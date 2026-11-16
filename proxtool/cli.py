@@ -173,8 +173,12 @@ def cmd_release(a) -> None:
 
 def _find_sim(seconds: float):
     from . import ble
-    seen = asyncio.run(ble.scan(seconds))
-    sims = [(b, wall) for b, _, wall in seen.values() if b.is_sim]
+    sims = []
+    for _ in range(3):						# the Windows scanner sometimes hears nothing at first
+        seen = asyncio.run(ble.scan(seconds))
+        sims = [(b, wall) for b, _, wall in seen.values() if b.is_sim]
+        if sims:
+            break
     if not sims:
         sys.exit("no peer simulator (PRS beacon) heard: is it powered and in range?")
     b, wall = sims[0]
