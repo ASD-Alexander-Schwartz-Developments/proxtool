@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "proxtool"
+version = "0.1.0"
+description = "ProxTit BLE tags: scan, configure, download, bench test against the peer simulator"
+requires-python = ">=3.9"
+dependencies = ["bleak>=0.22"]
+
+[project.scripts]
+proxtool = "proxtool.cli:main"
+
+[tool.setuptools]
+packages = ["proxtool"]
