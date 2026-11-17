@@ -62,7 +62,8 @@ def cmd_scan(a) -> None:
         return
     for uid, (b, rssi, _) in sorted(seen.items()):
         if b.is_sim:
-            print(f"{uid}  SIMULATOR v{b.flags}  scenario t={b.time}/{b.count} s  rssi {rssi}")
+            print(f"{uid}  SIMULATOR v{b.flags}  uptime {b.time} s  scenario t={b.time % max(b.count, 1)}/{b.count} s"
+                  f"  boot {b.battery_pct}  late {b.tx_power} %  rssi {rssi}")
         else:
             print(f"{uid}  {P.MODES.get(b.mode, b.mode):6}  bat {b.battery_pct:3}%  log {b.count:4}  "
                   f"clock {iso(b.time)}  tx {b.tx_power:+d} dBm  rssi {rssi}  {b.flag_text()}")
@@ -174,7 +175,7 @@ def cmd_release(a) -> None:
 def _find_sim(seconds: float):
     from . import ble
     sims = []
-    for _ in range(3):						# the Windows scanner sometimes hears nothing at first
+    for _ in range(3):                      # the Windows scanner sometimes hears nothing at first
         seen = asyncio.run(ble.scan(seconds))
         sims = [(b, wall) for b, _, wall in seen.values() if b.is_sim]
         if sims:
@@ -188,74 +189,78 @@ def _find_sim(seconds: float):
     return b, wall
 
 
+def _sim_obs(b: P.Beacon, wall: float) -> list:
+    """[wall, uptime s, boot count, late %] from a v2 status beacon."""
+    return [wall, b.time, b.battery_pct, b.tx_power]
+
+
+async def _read_tag(t) -> list:
+    """[wall, tag clock, boot count, uptime s], read back to back."""
+    st = await t.stats(0)
+    tag_time = (await t.page()).time
+    return [time.time(), tag_time, st["boot_count"], st["uptime_s"]]
+
+
 def cmd_bench_start(a) -> None:
     from . import ble
     sim, wall = _find_sim(a.seconds)
-    session = {"sim_uid": sim.uid, "sim_obs": [[wall, sim.time]], "started": time.time(), "tags": {}}
+    session = {"version": 2, "sim_uid": sim.uid, "sim_obs": [_sim_obs(sim, wall)],
+               "started": time.time(), "tags": {}}
     for addr in a.tags:
         async def run():
             async with ble.Tag(addr) as t:
                 for reg, val in P.DEFAULT_BENCH_CONFIG.items():
-                    await t.set_cfg(reg, val)
+                    if not await t.set_cfg(reg, val):
+                        raise RuntimeError(f"SETCFG 0x{reg:02X}={val} refused")
                 if a.clear:
                     page = await t.page()
                     if page.pending:
                         await t.command(P.CMD_LOGACK, struct.pack("<IH", page.head_seq, page.pending))
                 tt = await t.set_time()
-                return tt, await t.get_cfg(0x0A), await t.get_cfg(0x06)
-        tt, gap, cap = asyncio.run(run())
-        session["tags"][addr.upper()] = {"set_time": time.time(), "silence_gap_s": gap, "max_encounter_s": cap}
-        print(f"{addr}: clock set {iso(tt)} UTC, silence gap {gap} s, max length {cap} s")
+                obs = await _read_tag(t)
+                return tt, obs, await t.get_cfg(0x0A), await t.get_cfg(0x06)
+        tt, obs, gap, cap = asyncio.run(run())
+        session["tags"][addr.upper()] = {"set_time": obs[0], "start_boots": obs[2], "clock_obs": [obs],
+                                         "silence_gap_s": gap, "max_encounter_s": cap}
+        print(f"{addr}: clock set {iso(tt)} UTC, boot {obs[2]}, silence gap {gap} s, max length {cap} s")
     with open(a.session, "w") as f:
         json.dump(session, f, indent=1)
-    print(f"simulator {sim.uid} at scenario t={sim.time} s; session -> {a.session}")
+    print(f"simulator {sim.uid}: uptime {sim.time} s (scenario t={sim.time % scenario.PERIOD_S}), "
+          f"boot {sim.battery_pct}, late {sim.tx_power} %; session -> {a.session}")
     print(f"Leave the tags next to the simulator. A full scenario loop takes {scenario.PERIOD_S // 60} min;"
-          f" then run: proxtool bench check {a.session}")
+          f" then run: proxtool bench check {a.session}  (add --every 3600 to keep checking)")
 
 
-def _unwrap(obs: List[List[float]]) -> List[tuple]:
-    """Scenario time is reported modulo the period: unwrap it along the wall clock."""
-    pts = []
-    w0, s0 = obs[0]
-    for w, s in obs:
-        expect = s0 + (w - w0)
-        k = round((expect - s) / scenario.PERIOD_S)
-        pts.append((w, s + k * scenario.PERIOD_S))
-    return pts
-
-
-def cmd_bench_check(a) -> None:
-    with open(a.session) as f:
-        session = json.load(f)
+def _bench_check_once(a, session: dict) -> bool:
+    if session.get("version") != 2:
+        sys.exit("session file from proxtool before bench v2: start a new session")
     if not a.offline:
         sim, wall = _find_sim(a.seconds)
-        session["sim_obs"].append([wall, sim.time])
-    sim_clock = verify.Clock(_unwrap(session["sim_obs"]))
+        session["sim_obs"].append(_sim_obs(sim, wall))
+    sim_obs = [verify.SimObs(*o) for o in session["sim_obs"]]
+    late = max(o.late_pct for o in sim_obs)
     ok_all = True
     for addr, meta in session["tags"].items():
-        if a.offline:
-            path = csv_path(a.out, addr)
-            tag_obs = meta.get("clock_obs", [[meta["set_time"], meta["set_time"]]])
-        else:
+        path = csv_path(a.out, addr)
+        if not a.offline:
             from . import ble
 
             async def run():
                 async with ble.Tag(addr) as t:
-                    p = csv_path(a.out, addr)
                     os.makedirs(a.out, exist_ok=True)
-                    await t.download(lambda recs: append_csv(p, recs))
-                    return p, (await t.page()).time
-            path, tag_time = asyncio.run(run())
-            meta.setdefault("clock_obs", [[meta["set_time"], meta["set_time"]]])
-            meta["clock_obs"].append([time.time(), tag_time])
-            tag_obs = meta["clock_obs"]
-        recs = [r for r in read_csv(path)]
-        window = (meta["set_time"], time.time() if not a.offline else meta.get("checked", time.time()))
-        rep = verify.check(recs, session["sim_uid"], sim_clock, verify.Clock(tag_obs), window,
-                           silence_gap_s=meta.get("silence_gap_s", 30),
-                           max_encounter_s=meta.get("max_encounter_s", 900))
-        meta["checked"] = window[1]
-        print(f"== tag {addr} ({path})")
+                    await t.download(lambda recs: append_csv(path, recs))
+                    return await _read_tag(t)
+            meta["clock_obs"].append(asyncio.run(run()))
+            meta["checked"] = time.time()
+        recs = read_csv(path) if os.path.exists(path) else []
+        tag_obs = [verify.TagObs(*o) for o in meta["clock_obs"]]
+        window = (meta["set_time"], meta.get("checked", time.time()))
+        rep = verify.check_run(recs, session["sim_uid"], sim_obs, tag_obs, meta["start_boots"], window,
+                               silence_gap_s=meta["silence_gap_s"], max_encounter_s=meta["max_encounter_s"])
+        if late > 5:
+            rep.notes.append(f"simulator sent up to {late} % of adverts late: it was overloaded, "
+                             "misses may be the simulator's")
+        print(f"== {iso(int(time.time()))} tag {addr} ({path}), {len(recs)} records")
         print(rep.summary())
         for m in rep.missing:
             print(f"  MISSING peer {m.expected.peer:2} at {iso(int(m.wall_start))} for {m.expected.duration} s")
@@ -268,7 +273,29 @@ def cmd_bench_check(a) -> None:
         ok_all &= rep.passed
     with open(a.session, "w") as f:
         json.dump(session, f, indent=1)
-    sys.exit(0 if ok_all else 1)
+    sys.stdout.flush()
+    return ok_all
+
+
+def cmd_bench_check(a) -> None:
+    with open(a.session) as f:
+        session = json.load(f)
+    while True:
+        try:
+            ok = _bench_check_once(a, session)
+        except SystemExit as e:             # simulator not heard, ...: retry later in --every mode
+            if not a.every:
+                raise
+            print(f"{iso(int(time.time()))} check skipped: {e}", flush=True)
+            ok = False
+        except Exception as e:
+            if not a.every:
+                raise
+            print(f"{iso(int(time.time()))} check failed: {type(e).__name__}: {e}", flush=True)
+            ok = False
+        if not a.every or a.offline:
+            sys.exit(0 if ok else 1)
+        time.sleep(a.every)
 
 
 def cmd_pair_check(a) -> None:
@@ -337,6 +364,8 @@ def main(argv=None) -> None:
     s.add_argument("-o", "--out", default="downloads")
     s.add_argument("-t", "--seconds", type=float, default=6)
     s.add_argument("--offline", action="store_true", help="use the CSVs already downloaded")
+    s.add_argument("--every", type=float, default=0, metavar="S",
+                   help="repeat every S seconds (keeps the tags' logs drained and catches restarts)")
     s.set_defaults(fn=cmd_bench_check)
 
     s = sub.add_parser("pair-check", help="two real tags: compare their logs of each other")

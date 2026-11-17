@@ -8,7 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, List, Tuple
 
-VERSION = 1
+VERSION = 2
 PERIOD_S = 3600
 PEERS = 20
 

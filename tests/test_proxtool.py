@@ -150,5 +150,104 @@ class Verify(unittest.TestCase):
         self.assertTrue(rep.passed, rep.summary())
 
 
+def run_log(sim_uid, sim_boot, w_from, w_to, tag_offset=0, seq0=0, jitter=2):
+    """Records a correct tag logs while the simulator (booted at wall sim_boot)
+    plays between w_from and w_to; tag clock = wall + tag_offset."""
+    recs, seq = [], seq0
+    k = int((w_from - sim_boot) // scenario.PERIOD_S) - 1
+    while sim_boot + k * scenario.PERIOD_S < w_to:
+        for e in scenario.expected_encounters():
+            w = sim_boot + k * scenario.PERIOD_S + e.start + jitter
+            if w < w_from or w + e.duration + 30 > w_to:
+                continue
+            uid = P.uid_bytes(scenario.peer_uid(sim_uid, e.peer))
+            recs.append(P.parse_record(seq, record_bytes(int(w + tag_offset), max(1, e.duration - jitter),
+                                                         uid, -50, -1)))
+            seq += 1
+        k += 1
+    recs.sort(key=lambda r: r.start)
+    for i, r in enumerate(recs):
+        r.seq = seq0 + i
+    return recs
+
+
+def boot_marker(seq, tag_time, boots):
+    return P.parse_record(seq, record_bytes(tag_time, 1, bytes([1, 255, 255, 255, 255, 255]), 127, boots))
+
+
+class Run(unittest.TestCase):
+    """verify.check_run: whole runs with restarts and power cuts."""
+    SIM = "C0:FF:EE:00:11:22"
+    W0 = 1_700_000_000
+
+    def test_sim_restart_observed(self):
+        boot_a, boot_b = self.W0 - 100, self.W0 + 5000
+        end = self.W0 + 4 * 3600
+        recs = run_log(self.SIM, boot_a, self.W0, boot_b) + run_log(self.SIM, boot_b, boot_b, end, seq0=500)
+        sim = [verify.SimObs(self.W0, 100, 5), verify.SimObs(end, end - boot_b, 6)]
+        tag = [verify.TagObs(self.W0, self.W0, 3, 50), verify.TagObs(end, end, 3, 50 + end - self.W0)]
+        rep = verify.check_run(recs, self.SIM, sim, tag, 3, (self.W0, end))
+        self.assertTrue(rep.passed, rep.summary())
+        self.assertTrue(any("restarted at" in n for n in rep.notes), rep.notes)
+        self.assertGreater(len(rep.matched), 60)
+
+    def test_sim_restart_unobserved(self):
+        """Two restarts, one never seen: its stretch is skipped, not failed."""
+        boot_a, boot_b, boot_c = self.W0 - 100, self.W0 + 5000, self.W0 + 9000
+        end = self.W0 + 5 * 3600
+        recs = (run_log(self.SIM, boot_a, self.W0, boot_b) + run_log(self.SIM, boot_b, boot_b, boot_c, seq0=300)
+                + run_log(self.SIM, boot_c, boot_c, end, seq0=600))
+        sim = [verify.SimObs(self.W0, 100, 5), verify.SimObs(end, end - boot_c, 7)]
+        tag = [verify.TagObs(self.W0, self.W0, 3, 50), verify.TagObs(end, end, 3, 50 + end - self.W0)]
+        rep = verify.check_run(recs, self.SIM, sim, tag, 3, (self.W0, end))
+        self.assertTrue(rep.passed, rep.summary())
+        self.assertTrue(any("unobserved" in n for n in rep.notes), rep.notes)
+
+    def test_tag_power_cut(self):
+        """Power lost for 2 h; the tag comes back with its clock 2 h behind."""
+        boot = self.W0 - 100
+        cut, back = self.W0 + 3 * 3600 + 200, self.W0 + 5 * 3600
+        end = self.W0 + 8 * 3600
+        before = run_log(self.SIM, boot, self.W0, cut)
+        lag = back - cut                                   # tag clock restored to ~the cut time
+        after = run_log(self.SIM, boot, back, end, tag_offset=-lag, seq0=len(before) + 1)
+        recs = before + [boot_marker(len(before), cut, 4)] + after
+        sim = [verify.SimObs(self.W0, 100, 5), verify.SimObs(end, end - boot, 5)]
+        tag = [verify.TagObs(self.W0, self.W0, 3, 50), verify.TagObs(end, end - lag, 4, end - back)]
+        rep = verify.check_run(recs, self.SIM, sim, tag, 3, (self.W0, end))
+        self.assertTrue(rep.passed, rep.summary())
+        self.assertTrue(any("tag restarted" in n for n in rep.notes), rep.notes)
+        self.assertEqual(len(rep.markers), 1)
+
+    def test_tag_boot_never_read(self):
+        """A boot with no clock reading cannot be placed in time: reported, not judged."""
+        boot = self.W0 - 100
+        cut = self.W0 + 2 * 3600 + 200
+        before = run_log(self.SIM, boot, self.W0, cut)
+        after = run_log(self.SIM, boot, cut + 600, cut + 7200, tag_offset=-600, seq0=len(before) + 1)
+        recs = before + [boot_marker(len(before), cut, 4)] + after
+        sim = [verify.SimObs(self.W0, 100, 5)]
+        tag = [verify.TagObs(self.W0, self.W0, 3, 50)]
+        rep = verify.check_run(recs, self.SIM, sim, tag, 3, (self.W0, cut + 7200))
+        self.assertTrue(any("not checked" in n for n in rep.notes), rep.notes)
+        self.assertEqual(rep.unexpected, [])
+
+    def test_split_detected(self):
+        """A crowd encounter logged in two pieces is a failure."""
+        boot = self.W0 - 100
+        end = self.W0 + 2 * 3600
+        recs = run_log(self.SIM, boot, self.W0, end)
+        victim = next(r for r in recs if r.peer == scenario.peer_uid(self.SIM, 12))
+        half = victim.duration // 2
+        tail = P.parse_record(9999, record_bytes(victim.start + half + 40, victim.duration - half - 40,
+                                                 P.uid_bytes(victim.peer), -50, -1))
+        victim.duration = half
+        sim = [verify.SimObs(self.W0, 100, 5)]
+        tag = [verify.TagObs(self.W0, self.W0, 3, 50)]
+        rep = verify.check_run(recs + [tail], self.SIM, sim, tag, 3, (self.W0, end))
+        self.assertFalse(rep.passed)
+        self.assertEqual(len(rep.missing), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

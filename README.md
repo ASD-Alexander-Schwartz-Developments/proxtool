@@ -19,7 +19,7 @@ pip install -e Host/proxtool          # gives the `proxtool` command (or: python
 | `proxtool download ADDR [-o DIR]` | Download the log to `DIR/<address>.csv`; each batch is written to disk before it is acknowledged, so a broken link loses nothing |
 | `proxtool release ADDR MS --yes` | Pulse the drop-off output |
 | `proxtool bench start ADDR... [--clear]` | Find the simulator, write the bench config and clock to the tags, save `bench_session.json` |
-| `proxtool bench check` | Download the tags and compare with the simulator scenario: PASS / FAIL with the missing and unexpected encounters |
+| `proxtool bench check [--every S]` | Download the tags and compare with the simulator scenario: PASS / FAIL with the missing and unexpected encounters, start/end error statistics, simulator and tag restarts. `--every 3600` repeats it hourly for overnight runs |
 | `proxtool pair-check A.csv ADDR_A B.csv ADDR_B` | Two real tags: did each log the other at the same times |
 
 CSV columns: `seq, start_unix, start_utc, duration_s, peer, rssi, tx_power, type,

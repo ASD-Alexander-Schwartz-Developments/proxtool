@@ -48,10 +48,16 @@ REGS = {
 }
 SIGNED_REGS = {0x03}
 
-# Written by `proxtool bench start`: logger mode and the encounter rules the
-# scenario expectations assume (the firmware defaults).
+# Written by `proxtool bench start`: logger mode, the firmware's default radio
+# schedule (a tag keeps old values in flash; the simulator plays the defaults)
+# and the encounter rules the scenario expectations assume. Keep the radio
+# values equal to PROX_*_DEFAULT* in Proxtit/proxtit_types.h.
 DEFAULT_BENCH_CONFIG = {
     0x00: 1,        # prox_mode: logger
+    0x01: 100,      # beacon interval (ms)
+    0x02: 1,        # beacon duration x100 ms (>= interval: continuous)
+    0x04: 1000,     # scan interval (ms)
+    0x07: 35,       # scan window (ms)
     0x05: 85,       # proximity threshold (dB path loss)
     0x06: 900,      # maximum encounter length (s)
     0x0A: 30,       # silence gap (s)
@@ -106,10 +112,12 @@ class Beacon:
     uid: str
     tx_power: int               # dBm the sender claims
     battery_pct: int
-    time: int                   # tag clock (unix s); scenario time for "PRS"
+    time: int                   # tag clock (unix s); "PRS": simulator uptime (s)
     mode: int
     flags: int
     count: int                  # records waiting for download; scenario period for "PRS"
+    # "PRS" v2 also: battery_pct = simulator boot count (low 8 bits),
+    # tx_power = share of adverts the simulator sent late (%).
 
     @property
     def is_sim(self) -> bool:
