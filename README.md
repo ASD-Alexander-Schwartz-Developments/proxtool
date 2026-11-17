@@ -83,7 +83,7 @@ What is open and what is not:
 | Part | Status |
 |---|---|
 | proxtool (this folder): window, command line, bench checker | open, Apache-2.0 |
-| ProxTit BLE protocol (beacon, GATT, download, OTA) | open: documented in `Proxtit/docs/` and the user guides |
+| ProxTit BLE protocol (beacon, GATT, download, firmware update) | open: [docs/ble-protocol.md](docs/ble-protocol.md) |
 | ProxTit firmware, peer simulator firmware | closed (ASD) |
 | RoostBox link (future) | closed: a separate plugin package, see below |
 
@@ -131,16 +131,19 @@ re-license proxtool or move code from it into closed products.
 
 CSV columns: `seq, start_unix, start_utc, duration_s, peer, rssi, tx_power, type,
 detail`. `type` is `marker` for BOOT / TIMESET / POWEROFF / START records (see
-`Proxtit/docs/ble_download_protocol.md`). A record downloaded twice (an ack that
-never reached the tag) has the same `seq`; readers keep one.
+[docs/ble-protocol.md](docs/ble-protocol.md)). A record downloaded twice (an ack
+that never reached the tag) has the same `seq`; readers keep one.
 
-The bench procedure is in [docs/bench-test-plan.md](../../docs/bench-test-plan.md).
+The `bench` commands need ASD's peer simulator, a development board running
+closed ASD firmware that plays a fixed scenario of virtual tags; they are used
+for ASD's firmware testing.
 
 ## Tests
 
 ```sh
-cd Host/proxtool && python -m unittest discover -s tests
+python -m unittest discover -s tests
 ```
 
-No radio needed: they cover the wire format, the scenario (checked against
-`Proxtit/peersim.c`) and the bench verifier.
+No radio needed: they cover the wire format, settings, firmware-update file
+checks and the bench verifier. Two tests compare against the closed firmware
+sources and are skipped when those are not next to proxtool.

@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """ProxTit BLE wire format (firmware 02.00.x): beacon, control point, log records.
 
-Normative description: Proxtit/docs/ble_download_protocol.md. Everything here is
+Normative description: docs/ble-protocol.md. Everything here is
 plain bytes in / Python values out, so it can be tested without a radio.
 """
 from __future__ import annotations
