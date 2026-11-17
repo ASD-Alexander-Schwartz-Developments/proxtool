@@ -15,6 +15,7 @@
 
 **Reference**
 - [Command Line](Command-Line)
+- [Legacy Protocol (01.02.x)](Legacy-Protocol-01.02)
 - [Third-Party Licenses](Third-Party-Licenses)
 - [For Developers](For-Developers)
 

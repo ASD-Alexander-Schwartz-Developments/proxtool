@@ -19,5 +19,7 @@ like for 02.00 tags. If a running study depends on local time, keep it with the
 command-line option `--legacy-local-time`, and note which convention each data
 set uses.
 
+The 01.02.x protocol itself is described on [Legacy Protocol (01.02.x)](Legacy-Protocol-01.02).
+
 Updating these tags to the current firmware is recommended: downloads become
 loss-free and the clock survives a restart. See [Firmware Updates](Firmware-Updates).
