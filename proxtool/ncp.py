@@ -190,6 +190,7 @@ class NcpTransport(L.Transport):
             port = found[0][0]
         self.port = port
         self.bgapi = bgapi
+        self.baudrate, self.rtscts = int(baudrate), rtscts
         self.lib = bgapi.BGLib(bgapi.SerialConnector(port, baudrate=int(baudrate), rtscts=rtscts), XAPI,
                                event_handler=self._from_reader)
 
@@ -242,21 +243,42 @@ class NcpTransport(L.Transport):
                 self.links.clear()
             return
         self.loop = running
-        self.lib.open()
-        boot = self._expect(lambda e: e == "bt_evt_system_boot")
-        self.call(lambda: self.lib.bt.system.reset(0))
-        try:
-            evt = await asyncio.wait_for(boot, 10.0)
-        except asyncio.TimeoutError:
-            self.lib.close()
+        evt = await self._boot()
+        if evt is None and self.bgapi is not None:
+            # NCP builds differ in hardware flow control (the Silicon Labs example
+            # enables RTS/CTS; many adapters do not wire it): try the other way.
+            self.rtscts = not self.rtscts
+            self.lib = self.bgapi.BGLib(self.bgapi.SerialConnector(self.port, baudrate=self.baudrate,
+                                                                   rtscts=self.rtscts),
+                                        XAPI, event_handler=self._from_reader)
+            evt = await self._boot()
+        if evt is None:
             self.loop = None
             raise SystemExit(f"no answer from the NCP adapter on {self.port} (is it running the "
-                             "Silicon Labs NCP firmware?)")
+                             "Silicon Labs NCP firmware? is another program using the port?)")
         self.stack_version = f"{evt.major}.{evt.minor}.{evt.patch}"
         host = getattr(self.lib.bt, "__version__", "?")
         if self.stack_version != host:
             log.info("NCP stack %s, BGAPI definition %s", self.stack_version, host)
         self.call(lambda: self.lib.bt.gatt.set_max_mtu(247))
+
+    async def _boot(self):
+        """Open the port, reset the adapter, wait for its boot event (None if silent)."""
+        try:
+            self.lib.open()
+        except Exception as e:
+            raise SystemExit(f"cannot open {self.port}: {e}")
+        boot = self._expect(lambda e: e == "bt_evt_system_boot")
+        try:
+            self.lib.bt.system.reset(0)
+            return await asyncio.wait_for(boot, 4.0)
+        except Exception:                      # timeout, or the write blocked (flow control)
+            boot.cancel()
+            try:
+                self.lib.close()
+            except Exception:
+                pass
+            return None
 
     # -- Transport --
     async def start_scan(self, on_beacon: L.BeaconCallback) -> None:
