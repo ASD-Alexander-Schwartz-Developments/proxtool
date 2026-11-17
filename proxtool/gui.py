@@ -189,8 +189,10 @@ class App:
 
         root.title(TITLE)
         _set_icon(root)
-        root.geometry("900x560")
-        root.minsize(720, 420)
+        self.scale = max(1.0, root.winfo_fpixels("1i") / 96.0)    # display scaling (DPI aware)
+        root.geometry(f"{self.px(900)}x{self.px(560)}")
+        root.minsize(self.px(720), self.px(420))
+        ttk.Style(root).configure("Treeview", rowheight=self.px(22))
         self._build()
         self.visited: Dict[str, float] = {}     # auto-download: tag -> last visit
         self.radio = Radio(self.inbox.put, self.prefs.get("via", "ble"))
@@ -200,6 +202,10 @@ class App:
         self._after["refresh"] = root.after(1000, self._refresh)
         root.protocol("WM_DELETE_WINDOW", self.close)
         self.log(f"Looking for tags. Downloads are saved in {self.outdir}")
+
+    def px(self, n: float) -> int:
+        """Pixels at 100 % display scaling -> pixels on this display."""
+        return int(round(n * self.scale))
 
     # -- layout --
     def _build(self) -> None:
@@ -233,7 +239,7 @@ class App:
         self.tree = ttk.Treeview(mid, columns=[c[0] for c in M.COLUMNS], show="headings", selectmode="extended")
         for key, head, width in M.COLUMNS:
             self.tree.heading(key, text=head)
-            self.tree.column(key, width=width, anchor="w")
+            self.tree.column(key, width=self.px(width), anchor="w")
         self.tree.tag_configure("warn", foreground="#b00020")
         sb = ttk.Scrollbar(mid, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=sb.set)
@@ -260,7 +266,7 @@ class App:
         self.progress.pack(fill="x")
         self.status = ttk.Label(bottom, text="")
         self.status.pack(fill="x")
-        self.logbox = ScrolledText(self.root, height=8, state="disabled", wrap="word")
+        self.logbox = ScrolledText(self.root, height=8, state="disabled", wrap="word", font="TkDefaultFont")
         self.logbox.pack(fill="both", padx=8, pady=(0, 8))
         self.logbox.tag_configure("err", foreground="#b00020")
 
@@ -642,7 +648,7 @@ class SettingsDialog:
         if len(addresses) > 1:
             ttk.Label(frm, text=f"Shown: the settings of {addresses[0]}. Saving writes them to all "
                                 f"{len(addresses)} selected tags.", foreground="#555",
-                      wraplength=560).pack(anchor="w", pady=(0, 6))
+                      wraplength=app.px(560)).pack(anchor="w", pady=(0, 6))
         self.vars: Dict[int, tk.StringVar] = {}
         basic = ttk.LabelFrame(frm, text="Encounter settings", padding=8)
         basic.pack(fill="x")
@@ -672,7 +678,8 @@ class SettingsDialog:
         else:
             ttk.Entry(r, textvariable=v, width=14).pack(side="left")
         ttk.Label(r, text=s.unit, width=8).pack(side="left", padx=(4, 0))
-        ttk.Label(parent, text=s.help, foreground="#555", wraplength=560, justify="left").pack(anchor="w", padx=(12, 0))
+        ttk.Label(parent, text=s.help, foreground="#555", wraplength=self.app.px(560),
+                  justify="left").pack(anchor="w", padx=(12, 0))
 
     def _toggle_adv(self) -> None:
         if self.show_adv.get():
@@ -708,7 +715,18 @@ class SettingsDialog:
         self.app.write_settings(self.addresses, wanted, self.current)
 
 
+def _dpi_aware() -> None:
+    """Sharp text on scaled Windows displays (125 %, 150 %, ...)."""
+    if sys.platform.startswith("win"):
+        try:
+            import ctypes
+            ctypes.windll.shcore.SetProcessDpiAwareness(1)
+        except Exception:
+            pass
+
+
 def main() -> None:
+    _dpi_aware()
     root = tk.Tk()
     try:
         App(root)

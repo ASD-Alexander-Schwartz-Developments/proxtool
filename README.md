@@ -1,9 +1,18 @@
-# proxtool
+# proxtool — ProxTit Tags
 
-PC tool for ProxTit BLE tags (firmware **02.00.x**): a **window** for users
-(find tags, download, set the clock, change settings) and a **command line** for
-engineering and the bench test against the peer simulator. It uses the
-computer's own Bluetooth LE through [bleak](https://github.com/hbldh/bleak).
+Open-source PC software for ASD's **ProxTit** Bluetooth proximity loggers: a
+**window** (ProxTit Tags) to find tags, download their logs, set their clocks,
+change their settings and update their firmware, and a **command line** for the
+same plus unattended collection. Tags are reached with the computer's own
+Bluetooth or a USB Bluetooth adapter (Silicon Labs NCP, e.g. Thunderboard BG22).
+
+**User documentation: the [wiki](https://github.com/ASD-Alexander-Schwartz-Developments/proxtool/wiki)**
+(source: [docs/wiki](docs/wiki)). Ready-made programs for Windows and Linux, no
+Python needed: [Releases](https://github.com/ASD-Alexander-Schwartz-Developments/proxtool/releases).
+Protocol: [docs/ble-protocol.md](docs/ble-protocol.md). VesperApp add-on:
+[docs/vesperapp-addon.md](docs/vesperapp-addon.md).
+
+![The ProxTit Tags window](docs/wiki/images/main-window.png)
 
 | | Windows 10/11 | Linux | macOS |
 |---|---|---|---|
@@ -55,8 +64,8 @@ tag, `rssi`, `tx_power`, `start_utc` = Start Time, `duration_s` = Seconds
 Duration. Records from 01.02.x tags have `seq` -1.
 
 ```sh
-pip install -e Host/proxtool          # pulls bleak; gives `proxtool` and `proxtool-gui`
-pip install -e "Host/proxtool[ncp]"   # also the USB NCP adapter (pyBGAPI)
+pip install -e .                      # pulls bleak; gives `proxtool` and `proxtool-gui`
+pip install -e ".[ncp]"               # also the USB NCP adapter (pyBGAPI)
 proxtool-gui                          # the window   (or: python -m proxtool.gui)
 proxtool -h                           # the command line (or: python -m proxtool)
 ```
@@ -114,6 +123,18 @@ GATT table, because the AppLoader exposes a different one at the same address.
 bootloader accepts unsigned images. Before field release decide on signed
 `.gbl` files (bootloader `BOOTLOADER_ENFORCE_SIGNED_UPGRADE`, a signing key kept
 by ASD) and on authentication for the control commands.
+
+## Building the stand-alone programs
+
+```sh
+pip install -e ".[ncp]" pyinstaller
+pyinstaller packaging/proxtool.spec        # -> dist/ProxTitTags/ (ProxTitTags + proxtool)
+python packaging/build_pack.py             # -> release zips + VesperApp plugin pack
+```
+
+A tag `vX.Y.Z` (matching `proxtool.__version__`) does this in CI for Windows and
+Linux and publishes a GitHub release (`.github/workflows/release.yml`); the wiki
+is published from `docs/wiki` with the same tag (`wiki-publish.yml`).
 
 ## Licence
 

@@ -1,0 +1,102 @@
+# Release: a tag vX.Y.Z builds the stand-alone programs for Windows and Linux,
+# attaches them to a GitHub release (plain zip + VesperApp plugin pack), and, if
+# the CDN secrets are set, publishes the packs to VesperApp's plugin feed
+# (plugins/proxtool/index.json). See docs/vesperapp-addon.md.
+name: Release
+
+on:
+  push:
+    tags: [ 'v*' ]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            rid: win-x64
+          - os: ubuntu-22.04          # older glibc: runs on more distributions
+            rid: linux-x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: |
+          python -m pip install -e ".[ncp]" pyinstaller
+      - name: Check the tag matches the package version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          V=$(python -c "import proxtool; print(proxtool.__version__)")
+          [ "v$V" = "${GITHUB_REF_NAME}" ] || { echo "::error::tag ${GITHUB_REF_NAME} != version $V"; exit 1; }
+      - name: Tests
+        run: python -m unittest discover -s tests
+      - name: Build
+        run: |
+          python -m PyInstaller --noconfirm packaging/proxtool.spec
+          python packaging/build_pack.py --rid ${{ matrix.rid }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: proxtool-${{ matrix.rid }}
+          path: |
+            dist/proxtool-*.zip
+            dist/proxtool-plugin-*.json
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+          merge-multiple: true
+      - name: GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" out/* --repo "${GITHUB_REPOSITORY}" \
+            --title "proxtool ${GITHUB_REF_NAME#v}" --notes "Stand-alone ProxTit Tags for Windows and Linux. Unzip proxtool-*-<platform>.zip and start ProxTitTags. The proxtool-plugin-* files are the VesperApp plugin pack (docs/vesperapp-addon.md)."
+
+  vesperapp-feed:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v') && vars.RELEASE_S3_BUCKET != ''
+    runs-on: ubuntu-latest
+    env:
+      S3_PREFIX: plugins/proxtool
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+          merge-multiple: true
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - name: Upload packs and update index.json
+        env:
+          BUCKET: ${{ vars.RELEASE_S3_BUCKET }}
+          CF: ${{ vars.CF_DISTRIBUTION_ID }}
+        run: |
+          set -euo pipefail
+          V="${GITHUB_REF_NAME#v}"
+          for z in out/proxtool-plugin-*.zip; do
+            aws s3 cp "$z" "s3://${BUCKET}/${S3_PREFIX}/${V}/$(basename "$z")"
+          done
+          aws s3 cp "s3://${BUCKET}/${S3_PREFIX}/index.json" index.json || echo '{"schema":1,"releases":[]}' > index.json
+          jq -s '.' out/proxtool-plugin-*.json > new.json
+          jq --slurpfile new new.json --arg updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+             '{schema:1, updated:$updated, releases: ($new[0] + .releases) | unique_by(.version + "|" + .target)}' \
+             index.json > index.new.json
+          aws s3 cp index.new.json "s3://${BUCKET}/${S3_PREFIX}/index.json" --content-type application/json
+          if [ -n "${CF}" ]; then
+            aws cloudfront create-invalidation --distribution-id "${CF}" --paths "/${S3_PREFIX}/index.json"
+          fi

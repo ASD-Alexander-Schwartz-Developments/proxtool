@@ -31,7 +31,7 @@ class Row:
         return (self.uid, self.mode, str(self.records), self.battery, self.clock, self.signal, self.heard)
 
 
-COLUMNS = (("uid", "Tag", 150), ("mode", "Mode", 70), ("records", "Records", 70),
+COLUMNS = (("uid", "Tag", 150), ("mode", "Mode", 130), ("records", "Records", 70),
            ("battery", "Battery", 70), ("clock", "Clock", 150), ("signal", "Signal", 70),
            ("heard", "Last heard", 80))
 
@@ -59,7 +59,7 @@ def tag_rows(seen: Dict[str, tuple], now: float) -> List[Row]:
             clock = f"off by {off:+.0f} s"
         mode = P.MODES.get(b.mode, str(b.mode))
         if b.flags & P.FLAG_LOG_NEAR_FULL:
-            mode += ", log nearly full"
+            mode += ", log 90 % full"
         age = now - wall
         rows.append(Row(uid, mode, b.count, f"{b.battery_pct} %", clock, ok, f"{rssi} dBm",
                         "now" if age < 3 else f"{age:.0f} s ago"))

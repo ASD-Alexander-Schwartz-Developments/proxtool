@@ -1,0 +1,48 @@
+# Publish docs/wiki/ to the repository's GitHub wiki (proxtool.wiki.git).
+#
+# docs/wiki/ is the single source of the user documentation; the wiki is a
+# publish target, never edited directly (a publish overwrites direct edits).
+# Pages go live with a release tag (so they never describe features users do not
+# have yet) or on a manual run. Same scheme as VesperApp's wiki.
+# GitHub cannot create a wiki repository by API: the first page must be created
+# once in the web UI; after that this workflow keeps it in sync.
+name: Publish wiki
+
+on:
+  push:
+    tags: [ 'v*' ]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: wiki-publish
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Mirror docs/wiki into the wiki repository
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          WIKI_URL="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.wiki.git"
+          if ! git ls-remote "$WIKI_URL" >/dev/null 2>&1; then
+            echo "::error::The wiki does not exist yet. Create its first page once in the GitHub web UI, then re-run this workflow."
+            exit 1
+          fi
+          git clone --depth 1 "$WIKI_URL" wiki
+          find wiki -mindepth 1 -maxdepth 1 -not -name .git -exec rm -rf {} +
+          cp -r docs/wiki/. wiki/
+          rm -f wiki/*.py                       # helper scripts are not pages
+          cd wiki
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then echo "Wiki already up to date."; exit 0; fi
+          git commit -m "Sync from ${GITHUB_REPOSITORY}@$(git -C .. rev-parse --short HEAD) (docs/wiki)"
+          git push

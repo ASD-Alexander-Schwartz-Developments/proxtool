@@ -1,0 +1,8 @@
+__pycache__/
+*.egg-info/
+build/
+dist/
+# local bench and download data
+downloads/
+runs/
+bench_session.json
