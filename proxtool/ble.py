@@ -1,3 +1,5 @@
+# Copyright 2026 A.S.D - Alexander Schwartz Developments
+# SPDX-License-Identifier: Apache-2.0
 """BLE side of proxtool (bleak). Scan for beacons, and talk to one tag."""
 from __future__ import annotations
 
@@ -45,7 +47,8 @@ class Tag:
     def __init__(self, address: str, timeout: float = 20.0):
         _need_bleak()
         self.address = address
-        self.client = BleakClient(address, timeout=timeout)
+        # No cached GATT table: a firmware update can change it (Windows caches it per address).
+        self.client = BleakClient(address, timeout=timeout, winrt={"use_cached_services": False})
 
     async def __aenter__(self) -> "Tag":
         await self.client.connect()

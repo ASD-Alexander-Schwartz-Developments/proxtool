@@ -4,13 +4,28 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "proxtool"
-version = "0.1.0"
+version = "0.2.0"
 description = "ProxTit BLE tags: scan, configure, download, bench test against the peer simulator"
 requires-python = ">=3.9"
+license = { text = "Apache-2.0" }
+classifiers = [
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering",
+]
+authors = [{ name = "A.S.D - Alexander Schwartz Developments", email = "info@asd-tech.com" }]
 dependencies = ["bleak>=0.22"]
 
 [project.scripts]
 proxtool = "proxtool.cli:main"
 
+[project.gui-scripts]
+proxtool-gui = "proxtool.gui:main"
+
 [tool.setuptools]
 packages = ["proxtool"]
+
+[tool.setuptools.package-data]
+proxtool = ["assets/*", "THIRD-PARTY-NOTICES.md"]

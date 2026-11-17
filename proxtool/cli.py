@@ -1,3 +1,5 @@
+# Copyright 2026 A.S.D - Alexander Schwartz Developments
+# SPDX-License-Identifier: Apache-2.0
 """proxtool command line. `proxtool -h` lists the commands."""
 from __future__ import annotations
 
@@ -170,6 +172,22 @@ def cmd_release(a) -> None:
     print("pulse started" if asyncio.run(run()) else "REFUSED (0 ms or a pulse running)")
 
 
+def cmd_update(a) -> None:
+    from . import dfu
+    with open(a.file, "rb") as f:
+        data = f.read()
+    info = dfu.check_gbl(data)
+    print(f"{a.file}: {info.size} bytes, firmware {info.version or 'version unknown'}")
+    if not a.yes:
+        sys.exit("A firmware update restarts the tag; settings and log are kept. "
+                 "Download the tag first, then repeat with --yes.")
+
+    def prog(stage, frac):
+        print(f"\r{stage:<40} {frac * 100:5.1f} %", end="", flush=True)
+    fw = asyncio.run(dfu.update(a.address, data, prog))
+    print(f"\nthe tag now reports firmware {fw}")
+
+
 # ---- bench ---------------------------------------------------------------------
 
 def _find_sim(seconds: float):
@@ -318,6 +336,9 @@ def main(argv=None) -> None:
     ap = argparse.ArgumentParser(prog="proxtool", description="ProxTit BLE tags: scan, configure, download, bench test")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
+    s = sub.add_parser("gui", help="open the window (download, clock, settings)")
+    s.set_defaults(fn=lambda a: __import__("proxtool.gui", fromlist=["main"]).main())
+
     s = sub.add_parser("scan", help="list tags and simulators in range")
     s.add_argument("-t", "--seconds", type=float, default=8)
     s.set_defaults(fn=cmd_scan)
@@ -345,6 +366,12 @@ def main(argv=None) -> None:
     s.add_argument("-o", "--out", default="downloads")
     s.add_argument("--no-ack", action="store_true", help="read one batch, leave everything on the tag")
     s.set_defaults(fn=cmd_download)
+
+    s = sub.add_parser("update", help="update the tag firmware from a .gbl file (needs --yes)")
+    s.add_argument("address")
+    s.add_argument("file", help="firmware update file (.gbl)")
+    s.add_argument("--yes", action="store_true")
+    s.set_defaults(fn=cmd_update)
 
     s = sub.add_parser("release", help="pulse the drop-off output (needs --yes)")
     s.add_argument("address")

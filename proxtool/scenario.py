@@ -1,3 +1,5 @@
+# Copyright 2026 A.S.D - Alexander Schwartz Developments
+# SPDX-License-Identifier: Apache-2.0
 """Mirror of the peer simulator scenario (Proxtit/peersim.c) and the encounters a
 tag under test must log from it.
 

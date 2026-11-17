@@ -1,3 +1,5 @@
+# Copyright 2026 A.S.D - Alexander Schwartz Developments
+# SPDX-License-Identifier: Apache-2.0
 """ProxTit BLE wire format (firmware 02.00.x): beacon, control point, log records.
 
 Normative description: Proxtit/docs/ble_download_protocol.md. Everything here is

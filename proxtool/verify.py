@@ -1,3 +1,5 @@
+# Copyright 2026 A.S.D - Alexander Schwartz Developments
+# SPDX-License-Identifier: Apache-2.0
 """Compare what a tag logged against the encounters the peer simulator played.
 
 Pure functions (no radio): proxtool bench check feeds them the downloaded

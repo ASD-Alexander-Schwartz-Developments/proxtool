@@ -1,3 +1,5 @@
+# Copyright 2026 A.S.D - Alexander Schwartz Developments
+# SPDX-License-Identifier: Apache-2.0
 """proxtool unit tests (no radio): python -m unittest discover -s tests"""
 import os
 import pathlib
@@ -6,7 +8,7 @@ import struct
 import unittest
 
 from proxtool import protocol as P
-from proxtool import scenario, verify
+from proxtool import dfu, model, scenario, settings, verify
 
 PEERSIM_C = os.path.join(os.path.dirname(__file__), "..", "..", "..", "Proxtit", "peersim.c")
 PEERSIM_H = os.path.join(os.path.dirname(__file__), "..", "..", "..", "Proxtit", "peersim.h")
@@ -62,6 +64,7 @@ class Protocol(unittest.TestCase):
 
 
 class Scenario(unittest.TestCase):
+    @unittest.skipUnless(os.path.exists(PEERSIM_C), "firmware sources not here (stand-alone proxtool)")
     def test_matches_peersim_c(self):
         """scenario.py must mirror the simulator firmware's table."""
         src = pathlib.Path(PEERSIM_C).read_text(encoding="utf-8")
@@ -293,6 +296,103 @@ class Run(unittest.TestCase):
         rep = verify.check_run(recs + first, self.SIM, sim, tag, 3, (self.W0, end))
         self.assertEqual([r for r in rep.unexpected if r.seq >= 800], [], rep.summary())
         self.assertFalse(any(m.expected.peer == 2 and m.wall_start < self.W0 + 1900 for m in rep.missing))
+
+
+class Settings(unittest.TestCase):
+    def test_parse_and_display(self):
+        tx = settings.BY_REG[0x03]
+        self.assertEqual(tx.parse("-1.0"), (-10, ""))
+        self.assertEqual(tx.parse("2,5")[0], 25)
+        self.assertIsNone(tx.parse("7")[0])                 # above +6.0 dBm
+        self.assertEqual(tx.to_display(-10), "-1.0")
+        gap = settings.BY_REG[0x0A]
+        self.assertEqual(gap.parse("45"), (45, ""))
+        self.assertIsNone(gap.parse("1")[0])                # floor 2 s
+        self.assertIsNone(gap.parse("abc")[0])
+        mode = settings.BY_REG[0x00]
+        self.assertEqual(mode.parse("off")[0], 0)
+        self.assertEqual(mode.to_display(1), "Logger")
+        self.assertIn("unknown", mode.to_display(2))
+
+    def test_defaults_match_bench_config(self):
+        """The window's defaults are the firmware's (same source as bench start)."""
+        for reg, val in P.DEFAULT_BENCH_CONFIG.items():
+            s = settings.BY_REG.get(reg)
+            if s is not None:
+                self.assertEqual(int(round(s.default * s.scale)), val, s.label)
+
+    @unittest.skipUnless(os.path.exists(PEERSIM_C), "firmware sources not here (stand-alone proxtool)")
+    def test_defaults_match_firmware(self):
+        src = pathlib.Path(PEERSIM_C).with_name("proxtit_types.h").read_text(encoding="utf-8")
+        for name, reg in (("PROX_BEACON_IVAL_DEFAULT_MS", 0x01), ("PROX_BEACON_DURN_DEFAULT", 0x02),
+                          ("PROX_SCAN_IVAL_DEFAULT_MS", 0x04), ("PROX_SCAN_WINDOW_DEFAULT_MS", 0x07),
+                          ("PROX_SILENCE_GAP_DEFAULT", 0x0A), ("PROX_MAX_ENCOUNTER_DEFAULT", 0x06)):
+            m = re.search(r"#define\s+" + name + r"\s+(\d+)", src)
+            self.assertIsNotNone(m, name)
+            self.assertEqual(int(m.group(1)), settings.BY_REG[reg].default, name)
+
+    def test_write_order(self):
+        cur = {0x04: 1000, 0x07: 35, 0x00: 1}
+        grow = settings.write_order({0x07: 2000, 0x04: 5000, 0x00: 0, 0x0A: 60}, cur)
+        self.assertEqual([r for r, _ in grow], [0x0A, 0x04, 0x07, 0x00])   # interval before a bigger window, mode last
+        shrink = settings.write_order({0x07: 20, 0x04: 500}, cur)
+        self.assertEqual([r for r, _ in shrink], [0x07, 0x04])
+        self.assertEqual(settings.changed(cur, {0x04: 1000, 0x07: 50}), {0x07: 50})
+
+
+class Model(unittest.TestCase):
+    def test_rows(self):
+        now = 1_700_000_000.0
+        tag = P.Beacon("PRX", "AA:BB:CC:DD:EE:01", -1, 90, int(now), 1, P.FLAG_TIME_SET, 12)
+        unset = P.Beacon("PRX", "AA:BB:CC:DD:EE:02", -1, 90, 5000, 1, 0, 0)
+        late = P.Beacon("PRX", "AA:BB:CC:DD:EE:03", -1, 90, int(now) - 60, 1, P.FLAG_TIME_SET, 0)
+        sim = P.Beacon("PRS", "11:22:33:44:55:F1", 0, 8, 100, 0xA5, 2, 3600)
+        old = P.Beacon("PRX", "AA:BB:CC:DD:EE:04", -1, 90, int(now), 1, P.FLAG_TIME_SET, 0)
+        seen = {b.uid: (b, -60, now) for b in (tag, unset, late, sim)}
+        seen[old.uid] = (old, -60, now - 1000)
+        rows = {r.uid: r for r in model.tag_rows(seen, now)}
+        self.assertEqual(set(rows), {tag.uid, unset.uid, late.uid})          # no simulator, no stale tag
+        peer = P.Beacon("PRX", "11:22:33:44:55:07", -1, 0, 100, 1, 0, 0)       # a simulator's virtual peer
+        seen[peer.uid] = (peer, -60, now)
+        self.assertNotIn(peer.uid, {r.uid for r in model.tag_rows(seen, now)})
+        self.assertTrue(rows[tag.uid].clock_ok)
+        self.assertEqual(rows[tag.uid].records, 12)
+        self.assertEqual(rows[unset.uid].clock, "NOT SET")
+        self.assertIn("off by", rows[late.uid].clock)
+
+
+class Dfu(unittest.TestCase):
+    GBL = os.path.join(os.path.dirname(__file__), "..", "..", "..", "Proxtit", "cmake_gcc", "build",
+                       "images", "proxtit-02.00.01.gbl")
+
+    def fake_gbl(self, version=b"02.00.01"):
+        return (struct.pack("<II", dfu.GBL_HEADER_TAG, 8) + bytes(8) + struct.pack("<I", dfu.GBL_APP_TAG)
+                + b"\x00" * 40 + b"00.00.00\x00" + version + b"\x00" + bytes(64))
+
+    def test_check(self):
+        info = dfu.check_gbl(self.fake_gbl())
+        self.assertEqual(info.version, "02.00.01")
+        with self.assertRaises(ValueError):
+            dfu.check_gbl(b"\x00" * 100)                         # wrong header
+        with self.assertRaises(ValueError):
+            dfu.check_gbl(self.fake_gbl()[:20])                   # too small
+        no_app = self.fake_gbl().replace(struct.pack("<I", dfu.GBL_APP_TAG), bytes(4))
+        with self.assertRaises(ValueError):
+            dfu.check_gbl(no_app)
+
+    @unittest.skipUnless(os.path.exists(GBL), "built firmware image not present")
+    def test_real_image(self):
+        with open(self.GBL, "rb") as f:
+            self.assertIsNotNone(dfu.check_gbl(f.read()).version)
+
+    def test_chunks_and_address(self):
+        self.assertEqual(dfu.chunk_size(247), 244)
+        self.assertEqual(dfu.chunk_size(23), 20)
+        self.assertEqual(dfu.chunk_size(100) % 4, 0)
+        data = bytes(range(250)) * 3
+        self.assertEqual(b"".join(dfu.chunks(data, 244)), data)
+        self.assertEqual(dfu.address_plus_one("C0:FF:EE:12:34:56"), "C0:FF:EE:12:34:57")
+        self.assertEqual(dfu.address_plus_one("C0:FF:EE:12:34:FF"), "C0:FF:EE:12:35:00")
 
 
 if __name__ == "__main__":

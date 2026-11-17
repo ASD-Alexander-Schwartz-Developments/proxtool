@@ -1,13 +1,119 @@
 # proxtool
 
-PC tool for ProxTit BLE tags (firmware **02.00.x**) and the bench peer simulator.
-Uses the laptop's own Bluetooth LE through [bleak](https://github.com/hbldh/bleak)
-(Windows 10/11, macOS, Linux).
+PC tool for ProxTit BLE tags (firmware **02.00.x**): a **window** for users
+(find tags, download, set the clock, change settings) and a **command line** for
+engineering and the bench test against the peer simulator. It uses the
+computer's own Bluetooth LE through [bleak](https://github.com/hbldh/bleak).
+
+| | Windows 10/11 | Linux | macOS |
+|---|---|---|---|
+| Status | tested (bench, 2026-11-17) | supported, **not yet tested on hardware** | not supported: macOS hides Bluetooth addresses, which proxtool uses to name tags |
+| Needs | Python 3.9+ (Tkinter included) | Python 3.9+, `python3-tk`, BlueZ 5.43+ (`bluetoothd` running; user may need to be in the `bluetooth` group) | |
 
 ```sh
-pip install bleak
-pip install -e Host/proxtool          # gives the `proxtool` command (or: python -m proxtool)
+pip install -e Host/proxtool          # pulls bleak; gives `proxtool` and `proxtool-gui`
+proxtool-gui                          # the window   (or: python -m proxtool.gui)
+proxtool -h                           # the command line (or: python -m proxtool)
 ```
+
+## The window
+
+- **Tag list**: every ProxTit tag heard in the last 2 minutes, with its mode,
+  records waiting, battery, clock (**NOT SET** or **off by N s** in red), signal
+  and when it was last heard. The bench simulator and its virtual peers are not
+  listed.
+- **Download** (selected tags) / **Download all** (every tag with records waiting):
+  appends to `<folder>/<address>.csv` (same file and format as `proxtool download`).
+  Each batch is on disk before the tag is told to delete it; a broken link loses
+  nothing, the rest stays on the tag for the next try.
+- **Set clock**: sets the selected tags to this computer's time (UTC). Tags log in
+  UTC; a tag that lost power shows NOT SET until it is set.
+- **Settings...**: the encounter settings (mode, proximity threshold, silence time,
+  maximum length, TX power) with their units, limits and what they do; "Show radio
+  schedule settings" adds beacon and scan timing. With several tags selected, the
+  values of the first are shown and Save writes them to all, so a study's tags get
+  identical settings. Only changed values are written; the log shows what each tag
+  accepted (the tag may round, e.g. TX power to a step its radio supports).
+- **Details...**: firmware, clock offset, log state, every setting and the tag's
+  counters.
+- **Update firmware...**: pick a `.gbl` file; the window shows the version it
+  contains and asks before starting. See "Firmware update" below.
+- **About**: version, copyright, licence, third-party notices.
+- The download folder is remembered in `~/.proxtool.json`.
+
+All Bluetooth work runs in one background thread, one tag at a time; scanning
+pauses during a connection.
+
+## Firmware update
+
+The tag firmware contains the Silicon Labs in-place OTA DFU service and the
+AppLoader bootloader stage, so a tag is updated over Bluetooth from the `.gbl`
+file the firmware build produces (`Proxtit.gbl`):
+
+```sh
+proxtool update C0:FF:EE:12:34:56 proxtit-02.00.01.gbl --yes
+```
+
+1. proxtool writes 0x00 to OTA Control on the running tag; it restarts in
+   AppLoader (update) mode.
+2. proxtool connects to the AppLoader (same address, or address + 1), sends the
+   file in chunks of up to 244 bytes (each acknowledged), then 0x03.
+3. The tag restarts into the new firmware; proxtool reads the firmware version
+   back. Settings and stored records (NVM3) are kept.
+
+An interrupted update leaves the tag in AppLoader mode (it is not listed as a
+ProxTit tag then): run the update again. proxtool never reuses Windows' cached
+GATT table, because the AppLoader exposes a different one at the same address.
+
+**Security (open):** any Bluetooth central in range can start an update; the
+bootloader accepts unsigned images. Before field release decide on signed
+`.gbl` files (bootloader `BOOTLOADER_ENFORCE_SIGNED_UPGRADE`, a signing key kept
+by ASD) and on authentication for the control commands.
+
+## Licence
+
+© 2026 A.S.D - Alexander Schwartz Developments. proxtool is open source under the
+[Apache License 2.0](LICENSE) (see also [NOTICE](NOTICE)). The ASD name and logo
+are trademarks of A.S.D and are not licensed (Apache-2.0 section 6).
+Third-party components and their licences (all permissive: PSF, MIT,
+Apache-2.0): [proxtool/THIRD-PARTY-NOTICES.md](proxtool/THIRD-PARTY-NOTICES.md).
+
+What is open and what is not:
+
+| Part | Status |
+|---|---|
+| proxtool (this folder): window, command line, bench checker | open, Apache-2.0 |
+| ProxTit BLE protocol (beacon, GATT, download, OTA) | open: documented in `Proxtit/docs/` and the user guides |
+| ProxTit firmware, peer simulator firmware | closed (ASD) |
+| RoostBox link (future) | closed: a separate plugin package, see below |
+
+## Extending: RoostBox and other links (plan)
+
+RoostBox, a future ASD communicator, will collect tag data instead of the
+laptop's Bluetooth. Its protocol stays closed, so it will not live in this
+repository. The plan:
+
+- proxtool gets a small **transport interface**: "list tags", "download a tag",
+  "set clock / settings", "update firmware". The built-in transport is the
+  laptop's Bluetooth (today's `ble.py` / `dfu.py`).
+- The RoostBox transport is a **separate, closed package** (e.g.
+  `proxtool-roostbox`, distributed as a wheel to customers). It registers itself
+  under the Python entry-point group `proxtool.transports`; proxtool loads
+  whatever transports are installed and shows them as a choice in the window.
+- Apache-2.0 allows this: the closed plugin may use and extend proxtool without
+  being opened. Only proxtool's own notices must be kept.
+- **Keeping a protocol closed is not security.** Python code in a distributed
+  wheel can be read (and compiled modules reverse-engineered). Protect RoostBox
+  with authentication and encryption (per-device or per-study keys); the closed
+  source only keeps the details private.
+- The interface is defined once the RoostBox design exists (what the PC talks
+  to: the RoostBox itself, or a server it uploads to), not before.
+
+Contributions from outside ASD, if accepted, come in under Apache-2.0 (section
+5). Add a contributor licence agreement (CLA) first if ASD may later want to
+re-license proxtool or move code from it into closed products.
+
+## Command line
 
 | Command | Does |
 |---|---|
@@ -17,6 +123,7 @@ pip install -e Host/proxtool          # gives the `proxtool` command (or: python
 | `proxtool settime ADDR` | Set the tag clock from this PC (UTC) |
 | `proxtool getcfg ADDR` / `setcfg ADDR REG VALUE` | Config registers, by name (`silence_gap_s`) or number (`0x0A`) |
 | `proxtool download ADDR [-o DIR]` | Download the log to `DIR/<address>.csv`; each batch is written to disk before it is acknowledged, so a broken link loses nothing |
+| `proxtool update ADDR FILE.gbl --yes` | Firmware update over Bluetooth (see "Firmware update") |
 | `proxtool release ADDR MS --yes` | Pulse the drop-off output |
 | `proxtool bench start ADDR... [--clear]` | Find the simulator, write the bench config and clock to the tags, save `bench_session.json` |
 | `proxtool bench check [--every S]` | Download the tags and compare with the simulator scenario: PASS / FAIL with the missing and unexpected encounters, start/end error statistics, simulator and tag restarts. `--every 3600` repeats it hourly for overnight runs |
