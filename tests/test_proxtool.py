@@ -90,6 +90,12 @@ class Scenario(unittest.TestCase):
         self.assertEqual(len(exp), 27)
 
 
+def piece_len(expected, jitter, max_s=900):
+    """What the tag stores: a max-length piece is cut on the first beacon after
+    max_s (a little longer); other encounters lose a little at the edges."""
+    return expected + jitter if expected >= max_s else max(1, expected - jitter)
+
+
 def tag_log(sim_uid, loop_wall0, loops, jitter=2, drop=None, extra=None):
     """Records a perfect tag would log for `loops` scenario loops."""
     recs, seq = [], 0
@@ -99,7 +105,7 @@ def tag_log(sim_uid, loop_wall0, loops, jitter=2, drop=None, extra=None):
                 continue
             uid = P.uid_bytes(scenario.peer_uid(sim_uid, e.peer))
             start = int(loop_wall0 + k * scenario.PERIOD_S + e.start + jitter)
-            recs.append(P.parse_record(seq, record_bytes(start, max(1, e.duration - jitter), uid, -50, -1)))
+            recs.append(P.parse_record(seq, record_bytes(start, piece_len(e.duration, jitter), uid, -50, -1)))
             seq += 1
     for r in extra or []:
         recs.append(r)
@@ -161,7 +167,7 @@ def run_log(sim_uid, sim_boot, w_from, w_to, tag_offset=0, seq0=0, jitter=2):
             if w < w_from or w + e.duration + 30 > w_to:
                 continue
             uid = P.uid_bytes(scenario.peer_uid(sim_uid, e.peer))
-            recs.append(P.parse_record(seq, record_bytes(int(w + tag_offset), max(1, e.duration - jitter),
+            recs.append(P.parse_record(seq, record_bytes(int(w + tag_offset), piece_len(e.duration, jitter),
                                                          uid, -50, -1)))
             seq += 1
         k += 1
@@ -247,6 +253,46 @@ class Run(unittest.TestCase):
         rep = verify.check_run(recs + [tail], self.SIM, sim, tag, 3, (self.W0, end))
         self.assertFalse(rep.passed)
         self.assertEqual(len(rep.missing), 1)
+
+    def test_soft_split_accepted(self):
+        """Peer 3's 20 s silences are 10 s under the gap: a split there is accepted
+        (and listed); the same split of peer 1, which has no silence, fails."""
+        boot = self.W0 - 100
+        end = self.W0 + 2 * 3600
+        sim = [verify.SimObs(self.W0, 100, 5)]
+        tag = [verify.TagObs(self.W0, self.W0, 3, 50)]
+
+        def split(recs, peer, at_scen, gap):
+            v = next(r for r in recs if r.peer == scenario.peer_uid(self.SIM, peer) and r.start > self.W0 + 600)
+            cut = int(v.start - (v.start - boot) % scenario.PERIOD_S + at_scen) - v.start
+            tail = P.parse_record(9999, record_bytes(v.start + cut + gap, v.duration - cut - gap,
+                                                     P.uid_bytes(v.peer), -50, -1))
+            v.duration = cut
+            return recs + [tail]
+
+        # Peer 3 is on 300-339, silent 340-359: heard until ~337, again from ~365.
+        recs = split(run_log(self.SIM, boot, self.W0, end), 3, 337, 28)
+        rep = verify.check_run(recs, self.SIM, sim, tag, 3, (self.W0, end))
+        self.assertTrue(rep.passed, rep.summary())
+        self.assertEqual(len(rep.soft_splits), 1)
+        recs = split(run_log(self.SIM, boot, self.W0, end), 1, 337, 31)
+        rep = verify.check_run(recs, self.SIM, sim, tag, 3, (self.W0, end))
+        self.assertFalse(rep.passed)
+
+    def test_encounter_in_progress_at_start(self):
+        """Peer 2 already in range when the run starts: the tag's pieces are offset
+        from the scenario's 900 s boundaries; that encounter is not judged."""
+        boot = self.W0 - 400                       # scenario t = 400 at the start: peer 2 since t = 100
+        end = self.W0 + 2 * 3600
+        recs = [r for r in run_log(self.SIM, boot, self.W0 + 3600, end)]
+        uid = P.uid_bytes(scenario.peer_uid(self.SIM, 2))
+        first = [P.parse_record(800, record_bytes(self.W0 + 2, 906, uid, -50, -1)),
+                 P.parse_record(801, record_bytes(self.W0 + 908, 890, uid, -50, -1))]   # peer 2 leaves at W0 + 1799
+        sim = [verify.SimObs(self.W0, 400, 5)]
+        tag = [verify.TagObs(self.W0, self.W0, 3, 50)]
+        rep = verify.check_run(recs + first, self.SIM, sim, tag, 3, (self.W0, end))
+        self.assertEqual([r for r in rep.unexpected if r.seq >= 800], [], rep.summary())
+        self.assertFalse(any(m.expected.peer == 2 and m.wall_start < self.W0 + 1900 for m in rep.missing))
 
 
 if __name__ == "__main__":

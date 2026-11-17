@@ -27,6 +27,39 @@ SEGMENTS: List[Tuple[int, int, int, int, int, int]] = [
 ] + [(p, 3000, 3300, 0, 0, 0) for p in range(8, 21)]
 
 
+# A silence shorter than the gap but within this margin of it may be logged as a
+# split: the tag hears a peer only every few seconds, so the silence it sees is
+# the real one plus a detection delay on each side.
+AMBIGUOUS_MARGIN_S = 20
+
+
+@dataclass(frozen=True)
+class Run:
+    """One whole encounter (before the tag cuts it into max-length pieces)."""
+    peer: int
+    start: int                  # scenario second
+    duration: int               # s
+    soft: Tuple[Tuple[int, int], ...] = ()   # (last second heard, next start) of near-threshold silences
+
+
+def expected_runs(silence_gap_s: int = 30) -> List[Run]:
+    """Whole encounters of one loop, with the near-threshold silences inside them."""
+    out: List[Run] = []
+    for peer in range(1, PEERS + 1):
+        merged: List[list] = []
+        for a, b in near_intervals(peer):
+            last = b - 1
+            if merged and a - merged[-1][1] <= silence_gap_s:
+                if a - merged[-1][1] > silence_gap_s - AMBIGUOUS_MARGIN_S:
+                    merged[-1][2].append((merged[-1][1], a))
+                merged[-1][1] = max(merged[-1][1], last)
+            else:
+                merged.append([a, last, []])
+        for a, last, soft in merged:
+            out.append(Run(peer, a, max(1, last - a), tuple(soft)))
+    return sorted(out, key=lambda r: (r.start, r.peer))
+
+
 @dataclass(frozen=True)
 class Expected:
     peer: int

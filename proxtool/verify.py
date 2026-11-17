@@ -52,6 +52,7 @@ class Report:
     other_peers: List[Record] = field(default_factory=list)
     markers: List[Record] = field(default_factory=list)
     notes: List[str] = field(default_factory=list)
+    soft_splits: List[Match] = field(default_factory=list)   # matched, split at a near-threshold silence
 
     @property
     def passed(self) -> bool:
@@ -67,6 +68,9 @@ class Report:
             f"records from other tags:      {len(self.other_peers)}",
             f"markers:                      {len(self.markers)}",
         ]
+        if self.soft_splits:
+            lines.append(f"accepted: {len(self.soft_splits)} encounter(s) split at a silence just under the gap "
+                         f"(the detection delays on both sides made it look longer)")
         if self.matched:
             st = sorted(m.start_err for m in self.matched)
             en = sorted(m.start_err + m.dur_err for m in self.matched)
@@ -83,6 +87,38 @@ class Report:
         return "\n".join(lines)
 
 
+@dataclass
+class _RecRun:
+    """Records of one peer that follow each other within CHAIN_S: the pieces a
+    long encounter is stored in (each new piece starts where the last ended)."""
+    peer: int
+    wall_start: float
+    wall_end: float
+    pieces: List[Record]
+
+
+CHAIN_S = 5             # a max-length piece and the next one touch (same second; allow clock rounding)
+
+
+def _rec_runs(sim_recs: List[Tuple[float, Record]], sim_uid: str) -> List[_RecRun]:
+    by_peer: dict = {}
+    for w, r in sim_recs:
+        by_peer.setdefault(scenario.uid_to_peer(sim_uid, r.peer), []).append((w, r))
+    runs: List[_RecRun] = []
+    for peer, lst in by_peer.items():
+        lst.sort(key=lambda x: x[0])
+        cur: Optional[_RecRun] = None
+        for w, r in lst:
+            if cur is not None and w - cur.wall_end <= CHAIN_S:
+                cur.pieces.append(r)
+                cur.wall_end = max(cur.wall_end, w + r.duration)
+                continue
+            cur = _RecRun(peer, w, w + r.duration, [r])
+            runs.append(cur)
+    runs.sort(key=lambda x: x.wall_start)
+    return runs
+
+
 def check(records: Sequence[Record], sim_uid: str, sim_clock: Clock, tag_clock: Clock,
           window: Tuple[float, float], silence_gap_s: int = 30, max_encounter_s: int = 900,
           tol_start_s: Optional[float] = None, tol_dur_s: Optional[float] = None) -> Report:
@@ -90,18 +126,28 @@ def check(records: Sequence[Record], sim_uid: str, sim_clock: Clock, tag_clock: 
     the simulator's boot, unwrapped (observed scenario time + loops); tag_clock
     maps wall -> tag clock. window: wall seconds the tag was logging the scenario.
 
+    What is compared is whole encounters ("runs"): a long encounter is stored in
+    back-to-back pieces of about the maximum length (the tag cuts on the first
+    beacon after it, so a piece is a few s longer), which are joined first; each
+    piece but the last must then be max_encounter_s .. max_encounter_s + gap long.
+
     Tolerances default to what a correct tag can do: it only knows a peer once it
     hears a beacon, so each edge of an encounter is late/early by a random
     detection delay (a few s, see the edge statistics in the summary). A delay
     as long as the silence gap would have split the encounter, so the start may
-    be off by up to one gap, the duration by up to two."""
+    be off by up to one gap, the duration by up to two.
+
+    A silence the scenario plays that is shorter than the gap but within
+    scenario.AMBIGUOUS_MARGIN_S of it may come out as a split (the detection delays
+    on both sides add to it). Such a split is accepted and listed in `soft_splits`;
+    a split at any other place is a failure."""
     if tol_start_s is None:
         tol_start_s = float(silence_gap_s)
     if tol_dur_s is None:
         tol_dur_s = 2.0 * silence_gap_s
     rep = Report()
     w0, w1 = window
-    exp = scenario.expected_encounters(silence_gap_s, max_encounter_s)
+    exp_runs = scenario.expected_runs(silence_gap_s)
     far = scenario.far_peers()
     period = scenario.PERIOD_S
 
@@ -120,43 +166,74 @@ def check(records: Sequence[Record], sim_uid: str, sim_clock: Clock, tag_clock: 
             rep.far_logged.append(r)
             continue
         sim_recs.append((wall, r))
+    runs = _rec_runs(sim_recs, sim_uid)
 
-    # Expected encounters of every scenario loop fully inside the window. An
-    # encounter is stored when the peer has been silent for the gap and the next
-    # minute sweep runs, so leave that much room before the end of the window.
     s0 = w0 + sim_clock.offset_at(w0)            # scenario seconds at the window edges
     s1 = w1 + sim_clock.offset_at(w1)
-    first_loop = int(s0 // period) - 1
-    last_loop = int(s1 // period) + 1
-    for loop in range(first_loop, last_loop + 1):
-        for e in exp:
-            scen_start = loop * period + e.start
-            # wall time of that scenario second: invert wall + offset(wall) ~= scen
-            wall = scen_start - sim_clock.offset_at(w0 + (scen_start - s0))
-            if wall < w0 + 5 or wall + e.duration + silence_gap_s + 70 > w1:
-                continue
-            m = Match(e, wall)
-            best = None
-            for i, (rw, r) in enumerate(sim_recs):
-                if scenario.uid_to_peer(sim_uid, r.peer) != e.peer:
-                    continue
-                se, de = rw - wall, r.duration - e.duration
-                if abs(se) <= tol_start_s and abs(de) <= tol_dur_s:
-                    if best is None or abs(se) < abs(best[1]):
-                        best = (i, se, de)
-            if best is None:
-                rep.missing.append(m)
-            else:
-                i, se, de = best
-                m.record, m.start_err, m.dur_err = sim_recs[i][1], se, de
-                rep.matched.append(m)
-                sim_recs.pop(i)
 
-    # Left-over simulator records inside the window are errors (fragments,
-    # wrong splits); ones touching the window edges are not judged.
-    for rw, r in sim_recs:
-        if rw >= w0 + 5 and rw + r.duration + silence_gap_s + 70 <= w1:
-            rep.unexpected.append(r)
+    def to_wall(scen: float) -> float:
+        return scen - sim_clock.offset_at(w0 + (scen - s0))
+
+    # Expected runs of every loop. A run is judged only if it lies inside the
+    # window with room for the gap and the minute sweep at the end; the records of
+    # runs cut by the window edges are not judged either.
+    excluded: List[Tuple[int, float, float]] = []
+    judged = []
+    for loop in range(int(s0 // period) - 1, int(s1 // period) + 2):
+        for e in exp_runs:
+            ws = to_wall(loop * period + e.start)
+            we = ws + e.duration
+            if ws + e.duration + silence_gap_s + 70 <= w0 or ws >= w1:
+                continue
+            if ws < w0 + 5 or we + silence_gap_s + 70 > w1:
+                excluded.append((e.peer, ws - tol_start_s, we + silence_gap_s + 70))
+                continue
+            judged.append((ws, e, [(to_wall(loop * period + a), to_wall(loop * period + b)) for a, b in e.soft]))
+
+    used = set()
+    for ws, e, soft in sorted(judged, key=lambda x: x[0]):
+        we = ws + e.duration
+        cand = [i for i, rr in enumerate(runs) if i not in used and rr.peer == e.peer
+                and ws - tol_start_s <= rr.wall_start <= we + tol_start_s]
+        m = Match(scenario.Expected(e.peer, e.start, e.duration), ws)
+        if not cand:
+            rep.missing.append(m)
+            continue
+        # Join pieces separated only at near-threshold silences of this run.
+        first = cand[0]
+        joined = [first]
+        for i in cand[1:]:
+            prev = runs[joined[-1]]
+            nxt = runs[i]
+            if any(abs(prev.wall_end - a) <= tol_start_s and abs(nxt.wall_start - b) <= tol_start_s
+                   for a, b in soft):
+                joined.append(i)
+            else:
+                break
+        start = runs[joined[0]].wall_start
+        end = runs[joined[-1]].wall_end
+        se, de = start - ws, (end - start) - e.duration
+        if abs(se) <= tol_start_s and abs(de) <= tol_dur_s:
+            m.record, m.start_err, m.dur_err = runs[joined[0]].pieces[0], se, de
+            rep.matched.append(m)
+            used.update(joined)
+            if len(joined) > 1:
+                rep.soft_splits.append(m)
+        else:
+            rep.missing.append(m)
+
+    # Piece lengths of every judged run, then left-over runs inside the window.
+    for i, rr in enumerate(runs):
+        if i in used:
+            for p in rr.pieces[:-1]:
+                if not (max_encounter_s <= p.duration <= max_encounter_s + silence_gap_s):
+                    rep.unexpected.append(p)        # cut at the wrong length
+            continue
+        if rr.wall_start < w0 + 5 or rr.wall_end + silence_gap_s + 70 > w1:
+            continue
+        if any(pe == rr.peer and a <= rr.wall_start <= b for pe, a, b in excluded):
+            continue
+        rep.unexpected.extend(rr.pieces)
     return rep
 
 
@@ -288,6 +365,7 @@ def check_run(records: Sequence[Record], sim_uid: str, sim_obs: Sequence[SimObs]
                 continue
             rep = check(ts.records, sim_uid, ss.clock, ts.clock, (w0, w1), silence_gap_s, max_encounter_s)
             total.matched += rep.matched
+            total.soft_splits += rep.soft_splits
             total.missing += rep.missing
             total.unexpected += rep.unexpected
             for lst, dst in ((rep.far_logged, total.far_logged), (rep.other_peers, total.other_peers)):
