@@ -195,6 +195,20 @@ Any BLE central can start an update: authentication and signed images are open.
   in the BLE log.
 - Encounters are keyed on the peer's `uid`; register 0x0B = RSSI split (default off).
 
+## Firmware 01.02.x (before 02.00)
+
+Tags in the field may still run 01.02.28 or earlier. Same beacon, service and
+control point, but:
+
+- each read of `prx_log` returns **one** 16-byte record and deletes it at once
+  (no count, no sequence number, no LOGACK); an empty log answers with ATT error
+  0x11. Store each record before the next read.
+- no GETPAGE, LOGACK, GETSTATS or SETTIME_UNIX: set the clock with SETTIME
+  (`sdate_time_t`); read it with GETTIME. The beacon `count` is the number of
+  records waiting; beacon byte 13 is always 0 (no flags).
+- The firmware revision string (Device Information, `0x2A26`) tells the
+  versions apart.
+
 ## Notes
 - Negotiate a large MTU (e.g. 247) first for the best throughput (15 records/read).
 - Download regularly: when the ring is full the oldest record is overwritten

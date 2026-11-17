@@ -34,20 +34,20 @@ TITLE = "ProxTit Tags"
 # ---- Bluetooth thread -------------------------------------------------------------
 
 class Radio:
-    """Scanning plus one tag operation at a time, in a background thread."""
+    """Scanning plus one tag operation at a time, in a background thread, through
+    a transport (link.py): this computer's Bluetooth or a USB NCP adapter."""
 
-    def __init__(self, post: Callable[[Callable[[], None]], None]):
-        from . import ble
-        ble._need_bleak()
-        self.ble = ble
+    def __init__(self, post: Callable[[Callable[[], None]], None], via: str = "ble"):
         self.post = post                    # run a function on the window's thread
         self.loop = asyncio.new_event_loop()
         self.seen: Dict[str, tuple] = {}
         self.lock = threading.Lock()
-        self.scanner = None
+        self.scanning = False
         self.scan_error: Optional[str] = None
-        threading.Thread(target=self._run, daemon=True, name="proxtool-ble").start()
-        self.submit(self._start_scan())
+        self.transport = None
+        self.via = via
+        threading.Thread(target=self._run, daemon=True, name="proxtool-radio").start()
+        self.submit(self._switch(via))
 
     def _run(self) -> None:
         asyncio.set_event_loop(self.loop)
@@ -60,37 +60,62 @@ class Radio:
         with self.lock:
             return dict(self.seen)
 
+    async def _switch(self, via: str) -> None:
+        from . import link as L
+        await self._stop_scan()
+        if self.transport is not None:
+            try:
+                await self.transport.close()
+            except Exception:
+                pass
+        self.transport = None
+        with self.lock:
+            self.seen.clear()
+        self.via = via
+        try:
+            self.transport = L.make(via)
+            L.use(self.transport)
+        except (SystemExit, Exception) as e:
+            self.scan_error = str(e) or type(e).__name__
+            return
+        await self._start_scan()
+
+    def switch(self, via: str) -> None:
+        self.submit(self._switch(via))
+
     async def _start_scan(self) -> None:
-        if self.scanner is not None:
+        if self.scanning or self.transport is None:
             return
 
-        def cb(device, adv):
-            b = P.parse_beacon(adv.manufacturer_data, adv.local_name)
-            if b is not None:
-                with self.lock:
-                    self.seen[b.uid] = (b, adv.rssi, time.time())
+        def cb(b, rssi, wall):
+            with self.lock:
+                self.seen[b.uid] = (b, rssi, wall)
         try:
-            self.scanner = self.ble.BleakScanner(cb)
-            await self.scanner.start()
+            await self.transport.start_scan(cb)
+            self.scanning = True
             self.scan_error = None
-        except Exception as e:              # Bluetooth off, no adapter, ...
-            self.scanner = None
-            self.scan_error = _err(e)
+        except (SystemExit, Exception) as e:     # Bluetooth off, no adapter, ...
+            self.scanning = False
+            self.scan_error = _err(e) if isinstance(e, Exception) else str(e)
 
     async def _stop_scan(self) -> None:
-        if self.scanner is not None:
+        if self.scanning and self.transport is not None:
             try:
-                await self.scanner.stop()
+                await self.transport.stop_scan()
             finally:
-                self.scanner = None
+                self.scanning = False
 
     def run_on_tag(self, address: str, fn, done: Callable[[object, Optional[str]], None]) -> None:
         """Connect, run `await fn(tag)`, disconnect; then done(result, error) on the
         window thread. Scanning pauses meanwhile (connections are more reliable)."""
+        from .tag import Tag
+
         async def job():
             await self._stop_scan()
             try:
-                async with self.ble.Tag(address) as t:
+                if self.transport is None:
+                    raise RuntimeError(self.scan_error or "no radio")
+                async with Tag(address, self.transport) as t:
                     return await fn(t), None
             except Exception as e:
                 return None, _err(e)
@@ -167,11 +192,9 @@ class App:
         root.geometry("900x560")
         root.minsize(720, 420)
         self._build()
-        try:
-            self.radio = Radio(self.inbox.put)
-        except SystemExit as e:
-            messagebox.showerror(TITLE, str(e))
-            raise
+        self.visited: Dict[str, float] = {}     # auto-download: tag -> last visit
+        self.radio = Radio(self.inbox.put, self.prefs.get("via", "ble"))
+        self._fill_radios()
         self._after = {}
         self._after["pump"] = root.after(100, self._pump)
         self._after["refresh"] = root.after(1000, self._refresh)
@@ -192,6 +215,18 @@ class App:
         if self._logo is not None:
             ttk.Label(top, image=self._logo, cursor="hand2").pack(side="right", padx=(12, 0))
         ttk.Button(top, text="About", command=self._about).pack(side="right", padx=(12, 0))
+
+        bar = ttk.Frame(self.root)
+        bar.pack(fill="x", **pad)
+        ttk.Label(bar, text="Reach tags with:").pack(side="left")
+        self.radiovar = tk.StringVar()
+        self.radiobox = ttk.Combobox(bar, textvariable=self.radiovar, state="readonly", width=46)
+        self.radiobox.pack(side="left", padx=6)
+        self.radiobox.bind("<<ComboboxSelected>>", self._radio_chosen)
+        ttk.Button(bar, text="Refresh list", command=self._fill_radios).pack(side="left")
+        self.autovar = tk.BooleanVar(value=False)
+        ttk.Checkbutton(bar, text="Download and set the clock of tags in range automatically",
+                        variable=self.autovar, command=self._auto_toggled).pack(side="right")
 
         mid = ttk.Frame(self.root)
         mid.pack(fill="both", expand=True, **pad)
@@ -257,7 +292,49 @@ class App:
             self.radio.retry_scan()
         elif not self.busy:
             self.status.config(text=f"{len(rows)} tag(s) in range")
+        if self.autovar.get() and not self.busy:
+            now = time.time()
+            due = [r for r in rows if M.due(r, now, self.visited.get(r.uid, 0))]
+            if due:
+                steps = []
+                for r in due:
+                    self.visited[r.uid] = now
+                    if not r.clock_ok:
+                        steps.append(self._clock_step(r.uid))
+                    if r.records > 0:
+                        steps.append(self._download_step(r.uid, r.records))
+                self._queue(steps)
         self._after["refresh"] = self.root.after(1000, self._refresh)
+
+    # -- radio choice and automatic mode --
+    def _fill_radios(self) -> None:
+        from . import ncp
+        self.radio_choices = [("This computer's Bluetooth", "ble")]
+        for port, desc in ncp.candidate_ports():
+            self.radio_choices.append((f"USB adapter (NCP) on {port}: {desc}", f"ncp:{port}"))
+        self.radiobox.config(values=[c[0] for c in self.radio_choices])
+        cur = self.radio.via
+        names = [c[0] for c in self.radio_choices if c[1] == cur]
+        self.radiovar.set(names[0] if names else self.radio_choices[0][0])
+
+    def _radio_chosen(self, _evt=None) -> None:
+        via = dict(self.radio_choices).get(self.radiovar.get(), "ble")
+        if via == self.radio.via:
+            return
+        self.radio.switch(via)
+        self.prefs["via"] = via
+        M.save_prefs(self.prefs)
+        for i in self.tree.get_children():
+            self.tree.delete(i)
+        self.log(f"Now using: {self.radiovar.get()}")
+
+    def _auto_toggled(self) -> None:
+        if self.autovar.get():
+            self.visited.clear()
+            self.log("Automatic mode: every tag in range with records waiting, or a wrong clock, is "
+                     f"downloaded and its clock set, at most once every {M.REVISIT_S} s. Keep this window open.")
+        else:
+            self.log("Automatic mode off.")
 
     def close(self) -> None:
         for a in self._after.values():
@@ -333,7 +410,20 @@ class App:
             return
         self._queue([self._download_step(r.uid) for r in rows])
 
-    def _download_step(self, address: str):
+    def _clock_step(self, address: str):
+        def step(finished):
+            self.status.config(text=f"Setting the clock of {address}...")
+
+            def done(res, err):
+                if err:
+                    self.log(f"{address}: set clock failed: {err}", error=True)
+                else:
+                    self.log(f"{address}: clock set to {iso(res)} UTC")
+                finished()
+            self.radio.run_on_tag(address, lambda t: t.set_time(), done)
+        return step
+
+    def _download_step(self, address: str, expected: int = 0):
         def step(finished):
             os.makedirs(self.outdir, exist_ok=True)
             path = csv_path(self.outdir, address)
@@ -344,7 +434,7 @@ class App:
                 self.inbox.put(lambda: self.progress.config(value=100.0 * n / max(total, n, 1)))
 
             async def fn(t):
-                n = await t.download(lambda recs: append_csv(path, recs), progress=prog)
+                n = await t.download(lambda recs: append_csv(path, recs), progress=prog, expected=expected)
                 return n, await t.page()
 
             def done(res, err):
@@ -424,7 +514,8 @@ class App:
                 f"proxtool {__version__}, for ProxTit BLE tags (firmware 02.00.x)\n\n"
                 f"{COPYRIGHT}\n{LICENSE}\n{CONTACT}\n\n"
                 "Uses open-source software under permissive licences: Python and Tkinter (PSF), "
-                "bleak (MIT), pywinrt (MIT, Windows), dbus-fast (MIT, Linux), typing_extensions (PSF). "
+                "bleak (MIT), pywinrt (MIT, Windows), dbus-fast (MIT, Linux), typing_extensions (PSF); "
+                "for the USB NCP adapter pyBGAPI and the Silicon Labs API definition (zlib), pySerial (BSD). "
                 f"Details: {notices}")
         messagebox.showinfo(f"About {TITLE}", text)
 
@@ -488,12 +579,19 @@ class App:
         self._set_busy(True, f"Reading the settings of {first}...")
 
         async def read(t):
+            if await t.legacy():
+                return await t.firmware()
             return {s.reg: await t.get_cfg(s.reg) for s in S.SETTINGS}
 
         def done(cur, err):
             self._set_busy(False)
             if err:
                 self.log(f"{first}: {err}", error=True)
+                return
+            if isinstance(cur, str):
+                messagebox.showinfo(TITLE, f"{first} runs firmware {cur}. Its settings differ from "
+                                    "firmware 02.00 and are not changed here; update its firmware first "
+                                    "(Download still works).")
                 return
             SettingsDialog(self, sel, cur)
         self.radio.run_on_tag(first, read, done)

@@ -13,6 +13,7 @@ from . import protocol as P
 
 CLOCK_TOLERANCE_S = 5           # a beacon's clock can be ~1 s old; more than this is "off"
 FORGET_AFTER_S = 120            # a tag not heard for this long leaves the table
+REVISIT_S = 60                  # automatic mode: at most one visit per tag per minute
 
 
 @dataclass
@@ -45,12 +46,17 @@ def tag_rows(seen: Dict[str, tuple], now: float) -> List[Row]:
     for uid, (b, rssi, wall) in seen.items():
         if b.is_sim or uid[:-2] in sims or now - wall > FORGET_AFTER_S:
             continue
-        if not b.flags & P.FLAG_TIME_SET:
-            clock, ok = "NOT SET", False
+        # The clock is judged by what the beacon shows. (The "set since boot" flag
+        # is not used for this: firmware 01.02.x never sets it, and a 02.00 tag
+        # restores a nearly right clock after a restart.)
+        off = b.time - wall
+        ok = abs(off) <= CLOCK_TOLERANCE_S
+        if ok:
+            clock = "ok"
+        elif not b.flags & P.FLAG_TIME_SET and abs(off) > 365 * 86400:
+            clock = "NOT SET"
         else:
-            off = b.time - (wall)
-            ok = abs(off) <= CLOCK_TOLERANCE_S
-            clock = "ok" if ok else f"off by {off:+.0f} s"
+            clock = f"off by {off:+.0f} s"
         mode = P.MODES.get(b.mode, str(b.mode))
         if b.flags & P.FLAG_LOG_NEAR_FULL:
             mode += ", log nearly full"
@@ -59,6 +65,12 @@ def tag_rows(seen: Dict[str, tuple], now: float) -> List[Row]:
                         "now" if age < 3 else f"{age:.0f} s ago"))
     rows.sort(key=lambda r: r.uid)
     return rows
+
+
+def due(row: Row, now: float, last_visit: float) -> bool:
+    """Automatic mode (as the earlier NCP downloader did): visit a tag that has
+    records waiting or a wrong clock, at most once every REVISIT_S."""
+    return (row.records > 0 or not row.clock_ok) and now - last_visit >= REVISIT_S
 
 
 def prefs_path() -> str:

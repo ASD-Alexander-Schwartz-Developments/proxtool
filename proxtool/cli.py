@@ -50,8 +50,10 @@ def read_csv(path: str) -> List[P.Record]:
             out.append(P.Record(int(row["seq"]), int(row["start_unix"]), int(row["duration_s"]),
                                 row["peer"], int(row["rssi"]), int(row["tx_power"])))
     # A record downloaded twice (no ack reached the tag) has the same seq: keep one.
-    uniq = {r.seq: r for r in out}
-    return [uniq[k] for k in sorted(uniq)]
+    # Records from firmware 01.02.x have no sequence number (seq -1): keep all.
+    uniq = {r.seq: r for r in out if r.seq >= 0}
+    legacy = [r for r in out if r.seq < 0]
+    return legacy + [uniq[k] for k in sorted(uniq)]
 
 
 # ---- commands ------------------------------------------------------------------
@@ -186,6 +188,45 @@ def cmd_update(a) -> None:
         print(f"\r{stage:<40} {frac * 100:5.1f} %", end="", flush=True)
     fw = asyncio.run(dfu.update(a.address, data, prog))
     print(f"\nthe tag now reports firmware {fw}")
+
+
+def cmd_gateway(a) -> None:
+    """Unattended collection, as the earlier NCP downloader did: keep scanning;
+    every tag in range with records waiting or a wrong clock gets its clock set
+    and its log downloaded (each tag at most once per --revisit seconds)."""
+    from . import link as L, model as M
+    from .tag import Tag
+    t = L.current()
+    os.makedirs(a.out, exist_ok=True)
+    visited: Dict[str, float] = {}
+    print(f"gateway via {t.description}; files in {os.path.abspath(a.out)}; Ctrl-C stops", flush=True)
+
+    async def visit(uid: str, row) -> None:
+        path = csv_path(a.out, uid)
+        async with Tag(uid, t) as tag:
+            fw = await tag.firmware()
+            if not row.clock_ok:
+                await tag.set_time()
+            n = await tag.download(lambda recs: append_csv(path, recs), expected=row.records)
+        print(f"{iso(int(time.time()))} {uid} fw {fw}: {n} record(s) -> {path}"
+              + ("" if row.clock_ok else f"; clock was {row.clock}, set"), flush=True)
+
+    async def loop():
+        while True:
+            seen = await t.scan(a.seconds)
+            now = time.time()
+            for row in M.tag_rows(seen, now):
+                if M.due(row, now, visited.get(row.uid, 0)):
+                    visited[row.uid] = now
+                    try:
+                        await visit(row.uid, row)
+                    except Exception as e:
+                        print(f"{iso(int(time.time()))} {row.uid}: {type(e).__name__}: {e}", flush=True)
+    M.REVISIT_S = a.revisit
+    try:
+        asyncio.run(loop())
+    except KeyboardInterrupt:
+        pass
 
 
 # ---- bench ---------------------------------------------------------------------
@@ -334,6 +375,12 @@ def cmd_pair_check(a) -> None:
 
 def main(argv=None) -> None:
     ap = argparse.ArgumentParser(prog="proxtool", description="ProxTit BLE tags: scan, configure, download, bench test")
+    ap.add_argument("--via", default=os.environ.get("PROXTOOL_VIA", "ble"), metavar="RADIO",
+                    help="how to reach tags: 'ble' (this computer's Bluetooth, default) or 'ncp[:PORT]' "
+                         "(USB adapter with Silicon Labs NCP firmware, e.g. a Thunderboard); env PROXTOOL_VIA")
+    ap.add_argument("--legacy-local-time", action="store_true",
+                    help="tags with firmware 01.02.x: set their clock to this computer's local time, as the "
+                         "earlier NCP downloader did (default: UTC, like firmware 02.00)")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     s = sub.add_parser("gui", help="open the window (download, clock, settings)")
@@ -366,6 +413,12 @@ def main(argv=None) -> None:
     s.add_argument("-o", "--out", default="downloads")
     s.add_argument("--no-ack", action="store_true", help="read one batch, leave everything on the tag")
     s.set_defaults(fn=cmd_download)
+
+    s = sub.add_parser("gateway", help="keep collecting: download and clock every tag that comes in range")
+    s.add_argument("-o", "--out", default="downloads")
+    s.add_argument("-t", "--seconds", type=float, default=5, help="scan time per round")
+    s.add_argument("--revisit", type=float, default=60, help="seconds before the same tag is visited again")
+    s.set_defaults(fn=cmd_gateway)
 
     s = sub.add_parser("update", help="update the tag firmware from a .gbl file (needs --yes)")
     s.add_argument("address")
@@ -404,6 +457,9 @@ def main(argv=None) -> None:
     s.set_defaults(fn=cmd_pair_check)
 
     args = ap.parse_args(argv)
+    from . import link as L
+    L.configure(args.via)
+    L.OPTIONS["legacy_local_time"] = args.legacy_local_time
     try:
         args.fn(args)
     except Exception as e:      # bleak errors: radio off, tag out of range, ...

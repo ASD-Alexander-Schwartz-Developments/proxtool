@@ -24,7 +24,6 @@ from __future__ import annotations
 import asyncio
 import re
 import struct
-import time
 from dataclasses import dataclass
 from typing import Callable, List, Optional
 
@@ -80,94 +79,61 @@ def address_plus_one(address: str) -> str:
     return ":".join(h[i:i + 2] for i in range(0, 12, 2))
 
 
-# ---- radio ------------------------------------------------------------------------
+# ---- radio (any transport, see link.py) ----------------------------------------------
 
 Progress = Callable[[str, float], None]     # (stage text, 0..1)
 
 
-async def _connect(address: str, timeout: float = 20.0):
-    from bleak import BleakClient
-    # Do not reuse the GATT table cached by Windows: the AppLoader exposes a
-    # different one at the same address.
-    client = BleakClient(address, timeout=timeout, winrt={"use_cached_services": False})
-    await client.connect()
-    return client
-
-
-async def _find(addresses: List[str], seconds: float) -> Optional[str]:
-    from bleak import BleakScanner
-    want = {a.upper() for a in addresses}
-    end = time.time() + seconds
-    while time.time() < end:
-        devs = await BleakScanner.discover(timeout=3.0)
-        for d in devs:
-            if d.address.upper() in want:
-                return d.address
-        await asyncio.sleep(0.2)
-    return None
-
-
-def _has(client, uuid: str) -> bool:
-    try:
-        return client.services.get_characteristic(uuid) is not None
-    except Exception:
-        return False
-
-
-async def update(address: str, gbl: bytes, progress: Progress) -> str:
-    """Update the tag at `address` with the .gbl image. Returns the firmware
-    version the tag reports afterwards."""
+async def update(address: str, gbl: bytes, progress: Progress, transport=None) -> str:
+    """Update the tag at `address` with the .gbl image through `transport`
+    (default: the current one). Returns the firmware version the tag reports
+    afterwards."""
+    from . import link as L
+    from .tag import Tag
     check_gbl(gbl)
+    t = transport or L.current()
 
     # 1. Running firmware -> AppLoader.
     progress("Connecting to the tag", 0.0)
-    client = await _connect(address)
+    link = await t.connect(address)
     try:
-        in_dfu = _has(client, OTA_DATA)
+        in_dfu = link.has(OTA_DATA)
         if not in_dfu:
-            if not _has(client, OTA_CONTROL):
+            if not link.has(OTA_CONTROL):
                 raise RuntimeError("this tag's firmware has no update service")
             progress("Restarting the tag in update mode", 0.02)
-            await client.write_gatt_char(OTA_CONTROL, CTRL_START, response=True)
+            await link.write(OTA_CONTROL, CTRL_START, response=True)
     finally:
-        try:
-            await client.disconnect()
-        except Exception:
-            pass
+        await link.close()
 
     # 2. Find and connect to the AppLoader.
     if not in_dfu:
         await asyncio.sleep(2.0)
     progress("Waiting for the tag in update mode", 0.04)
-    dfu_addr = await _find([address, address_plus_one(address)], 30.0)
+    dfu_addr = await t.find([address, address_plus_one(address)], 30.0)
     if dfu_addr is None:
         raise RuntimeError("the tag did not come back in update mode (move closer and try again)")
-    client = await _connect(dfu_addr)
+    link = await t.connect(dfu_addr)
     try:
-        if not _has(client, OTA_DATA):
+        if not link.has(OTA_DATA):
             raise RuntimeError("connected, but the update service is missing (not in update mode?)")
-        await client.write_gatt_char(OTA_CONTROL, CTRL_START, response=True)
-        size = chunk_size(getattr(client, "mtu_size", 23))
-        parts = chunks(gbl, size)
+        await link.write(OTA_CONTROL, CTRL_START, response=True)
+        parts = chunks(gbl, chunk_size(link.mtu))
         for i, part in enumerate(parts):
-            await client.write_gatt_char(OTA_DATA, part, response=True)
+            await link.write(OTA_DATA, part, response=True)
             if i % 8 == 0 or i == len(parts) - 1:
                 progress(f"Sending firmware ({(i + 1) * 100 // len(parts)} %)", 0.05 + 0.9 * (i + 1) / len(parts))
         progress("Finishing", 0.96)
-        await client.write_gatt_char(OTA_CONTROL, CTRL_END, response=True)
+        await link.write(OTA_CONTROL, CTRL_END, response=True)
     finally:
-        try:
-            await client.disconnect()
-        except Exception:
-            pass
+        await link.close()
 
     # 3. The tag restarts into the new firmware: read its version back.
     progress("Waiting for the tag to restart", 0.97)
     await asyncio.sleep(3.0)
-    if await _find([address], 30.0) is None:
+    if await t.find([address], 30.0) is None:
         raise RuntimeError("update sent, but the tag was not heard afterwards; check it with Details")
-    from . import ble
-    async with ble.Tag(address) as t:
-        fw = await t.firmware()
+    async with Tag(address, t) as tag:
+        fw = await tag.firmware()
     progress("Done", 1.0)
     return fw

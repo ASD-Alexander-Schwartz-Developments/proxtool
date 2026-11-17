@@ -358,6 +358,13 @@ class Model(unittest.TestCase):
         self.assertTrue(rows[tag.uid].clock_ok)
         self.assertEqual(rows[tag.uid].records, 12)
         self.assertEqual(rows[unset.uid].clock, "NOT SET")
+        legacy = P.Beacon("PRX", "AA:BB:CC:DD:EE:05", -1, 90, int(now), 1, 0, 3)   # 01.02.x: flag never set
+        seen[legacy.uid] = (legacy, -60, now)
+        r = {r.uid: r for r in model.tag_rows(seen, now)}[legacy.uid]
+        self.assertTrue(r.clock_ok)
+        self.assertTrue(model.due(r, now, 0))                                     # records waiting
+        self.assertFalse(model.due(r, now, now - 10))                             # visited 10 s ago
+        self.assertFalse(model.due(rows[tag.uid].__class__(**{**rows[tag.uid].__dict__, "records": 0}), now, 0))
         self.assertIn("off by", rows[late.uid].clock)
 
 

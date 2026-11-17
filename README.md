@@ -10,8 +10,53 @@ computer's own Bluetooth LE through [bleak](https://github.com/hbldh/bleak).
 | Status | tested (bench, 2026-11-17) | supported, **not yet tested on hardware** | not supported: macOS hides Bluetooth addresses, which proxtool uses to name tags |
 | Needs | Python 3.9+ (Tkinter included) | Python 3.9+, `python3-tk`, BlueZ 5.43+ (`bluetoothd` running; user may need to be in the `bluetooth` group) | |
 
+## Two ways to reach the tags
+
+| `--via` | Radio | Install | Notes |
+|---|---|---|---|
+| `ble` (default) | this computer's Bluetooth | `pip install -e .` | Windows 10/11, Linux (BlueZ) |
+| `ncp` or `ncp:PORT` | a USB Bluetooth adapter running the Silicon Labs **NCP** firmware, e.g. a **Thunderboard BG22** | `pip install -e .[ncp]` (adds pyBGAPI) | no Bluetooth needed on the computer; the adapter can sit next to the tags on a USB extension; same on Windows and Linux |
+
+The NCP adapter is how ProxTit tags were downloaded before proxtool (the earlier
+`proxtit-downloader-py` scripts). proxtool replaces those scripts and reads the
+same adapters; it finds the adapter by its USB id (SEGGER J-Link or Silicon Labs
+CP210x) or takes the port (`--via ncp:COM7`, `--via ncp:/dev/ttyACM0`). In the
+window, choose the radio under "Reach tags with". Whatever the radio, proxtool
+does the same things: download, clock, settings, firmware update, gateway.
+
+The adapter needs the Silicon Labs "Bluetooth - NCP" firmware for its board
+(Simplicity Studio example, or the image ASD supplied). proxtool talks BGAPI with
+the bundled API definition (Simplicity SDK 2024.12); a newer or older stack is
+reported and normally works, since only scanning, connections and GATT are used.
+
+**Unattended collection (gateway)** — what the earlier downloader did: keep
+scanning, and every tag that comes in range with records waiting or a wrong
+clock gets its clock set and its log downloaded:
+
+```sh
+proxtool --via ncp gateway -o ProxTitData      # Ctrl-C stops
+```
+
+In the window the same is "Download and set the clock of tags in range
+automatically". Each tag is visited at most once a minute (`--revisit`).
+
+**Tags still on firmware 01.02.x** (field units from before 02.00) are read
+too: proxtool detects the version and uses that firmware's download (each read
+returns one record and deletes it, so proxtool stores every record before the
+next read). Their settings are not changed from the window; update the firmware
+first. Their clock is set in **UTC**, like 02.00 tags. The earlier downloader set
+the computer's *local* time: add `--legacy-local-time` to keep that convention
+for an ongoing study, and note which one each data set uses.
+
+**Coming from the earlier downloader's `logs.csv`:** proxtool writes one file
+per tag, `<tag address>.csv`, with times in UTC (`start_unix` and
+`start_utc`). Columns map as: Unit = the tag (file name), `peer` = the other
+tag, `rssi`, `tx_power`, `start_utc` = Start Time, `duration_s` = Seconds
+Duration. Records from 01.02.x tags have `seq` -1.
+
 ```sh
 pip install -e Host/proxtool          # pulls bleak; gives `proxtool` and `proxtool-gui`
+pip install -e "Host/proxtool[ncp]"   # also the USB NCP adapter (pyBGAPI)
 proxtool-gui                          # the window   (or: python -m proxtool.gui)
 proxtool -h                           # the command line (or: python -m proxtool)
 ```
@@ -106,8 +151,12 @@ repository. The plan:
   wheel can be read (and compiled modules reverse-engineered). Protect RoostBox
   with authentication and encryption (per-device or per-study keys); the closed
   source only keeps the details private.
-- The interface is defined once the RoostBox design exists (what the PC talks
-  to: the RoostBox itself, or a server it uploads to), not before.
+- The interface exists: `proxtool/link.py` (Transport, Link). The NCP adapter
+  (`ncp.py`), RoostBox's predecessor, is the second built-in transport and shows
+  what a RoostBox plugin implements: scan for beacons, connect, read and write
+  GATT characteristics. If RoostBox works at a higher level (it downloads the
+  tags itself and the PC fetches files from it), the interface gains a
+  "collected records" call then.
 
 Contributions from outside ASD, if accepted, come in under Apache-2.0 (section
 5). Add a contributor licence agreement (CLA) first if ASD may later want to
@@ -123,7 +172,9 @@ re-license proxtool or move code from it into closed products.
 | `proxtool settime ADDR` | Set the tag clock from this PC (UTC) |
 | `proxtool getcfg ADDR` / `setcfg ADDR REG VALUE` | Config registers, by name (`silence_gap_s`) or number (`0x0A`) |
 | `proxtool download ADDR [-o DIR]` | Download the log to `DIR/<address>.csv`; each batch is written to disk before it is acknowledged, so a broken link loses nothing |
+| `proxtool gateway [-o DIR]` | Keep collecting: download and clock every tag that comes in range (see "Two ways to reach the tags") |
 | `proxtool update ADDR FILE.gbl --yes` | Firmware update over Bluetooth (see "Firmware update") |
+| `proxtool --via ncp[:PORT] ...` | Any command through a USB NCP adapter instead of this computer's Bluetooth |
 | `proxtool release ADDR MS --yes` | Pulse the drop-off output |
 | `proxtool bench start ADDR... [--clear]` | Find the simulator, write the bench config and clock to the tags, save `bench_session.json` |
 | `proxtool bench check [--every S]` | Download the tags and compare with the simulator scenario: PASS / FAIL with the missing and unexpected encounters, start/end error statistics, simulator and tag restarts. `--every 3600` repeats it hourly for overnight runs |
@@ -145,5 +196,6 @@ python -m unittest discover -s tests
 ```
 
 No radio needed: they cover the wire format, settings, firmware-update file
-checks and the bench verifier. Two tests compare against the closed firmware
+checks, the bench verifier, and the NCP transport and 01.02.x download against
+a stand-in adapter (`tests/test_ncp.py`). Two tests compare against the closed firmware
 sources and are skipped when those are not next to proxtool.
