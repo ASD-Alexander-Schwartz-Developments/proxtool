@@ -47,6 +47,7 @@ REGS = {
     0x09: "turn_off",
     0x0A: "silence_gap_s",
     0x0B: "rssi_split_db",
+    0x0C: "split_hold_s",
 }
 SIGNED_REGS = {0x03}
 
@@ -63,7 +64,7 @@ DEFAULT_BENCH_CONFIG = {
     0x05: 85,       # proximity threshold (dB path loss)
     0x06: 900,      # maximum encounter length (s)
     0x0A: 30,       # silence gap (s)
-    0x0B: 0,        # no RSSI split
+    0x0B: 0,        # no level-change split (bench start --rssi-split sets it)
 }
 REG_BY_NAME = {v: k for k, v in REGS.items()}
 

@@ -26,6 +26,11 @@ class Setting:
     scale: float = 1.0                  # shown value = raw / scale (TX power: 0.1 dBm -> dBm)
     signed: bool = False
     choices: Optional[Dict[int, str]] = None
+    since: str = ""                     # firmware that has it; older firmware reads it as 0
+
+    def missing(self, raw: Optional[int]) -> bool:
+        """True when the tag's firmware predates this setting (it reads 0, below the range)."""
+        return bool(self.since) and (raw is None or raw < self.lo)
 
     def to_display(self, raw: int) -> str:
         if self.choices is not None:
@@ -83,10 +88,14 @@ SETTINGS: List[Setting] = [
     Setting(0x07, "Scan window", "ms", 1, 65535, 35,
             "Listening time per scan interval. Longer = hears peers more often, more battery "
             "(listening is the largest battery cost).", advanced=True),
-    Setting(0x0B, "RSSI split", "dB", 0, 60, 0,
-            "A change in received signal of more than this starts a new record. 0 = never "
-            "(default: posture and body shading move the signal by more than 10 dB).",
-            advanced=True),
+    Setting(0x0B, "Level-change split", "dB", 0, 60, 0,
+            "When the path loss stays more than this away from the encounter's average for the "
+            "hold time, a new record starts there (the animals moved closer or apart). 0 = never "
+            "(default). Choose it from a calibration: about the difference "
+            "between two distances you want told apart. Before firmware 02.01.00 a single jump split."),
+    Setting(0x0C, "Level-change hold", "s", 2, 600, 10,
+            "How long a level change must last before it splits (and at least 3 beacons). Shorter "
+            "changes (posture, body shading) stay in the record's average.", since="02.01.00"),
 ]
 
 BY_REG = {s.reg: s for s in SETTINGS}

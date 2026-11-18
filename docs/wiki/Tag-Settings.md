@@ -21,7 +21,8 @@ may round, e.g. the TX power to a step its radio supports).
 | Beacon interval | 100 ms | 100–40,000 ms | Time between beacons. |
 | Beacon duration | 1 (×100 ms) | 0–100 | Advert burst per beacon; at least the interval = advertise continuously (default). |
 | Scan interval / window | 1,000 / 35 ms | | The tag listens for *window* ms of every *interval* ms. |
-| RSSI split | 0 (off) | 0–60 dB | A signal change of more than this starts a new record. |
+| Level-change split | 0 (off) | 0–60 dB | A lasting change in path loss of more than this starts a new record. See below. |
+| Level-change hold | 10 s | 2–600 s | How long the change must last (firmware 02.01.00). |
 
 **Use the same settings on every tag of a study**, so encounters are seen the
 same way from both sides.
@@ -67,3 +68,23 @@ Expected false splits during continuous contact between two tags:
   start and 3 s at the end with the default settings.
 - A pilot helps: two tags on animals or animal models together for an hour, then
   count the splits.
+
+## Changes of distance within an encounter
+
+A record holds one mean signal level. To see animals move closer or apart during a
+contact, switch on the **level-change split** (firmware 02.01.00): when the path loss
+stays more than *split* dB from the record's average for *hold* seconds, the record
+ends there and a new one starts, with its own average. For example 65 dB, then
+50 dB for 2 minutes: two records, back to back, 65 and 50 dB.
+
+- Choose *split* from a calibration: about the difference between the median path
+  losses of two distances you want told apart (e.g. 1 m and 3 m). Below about
+  8 dB the normal spread of the signal causes splits on its own.
+- Changes shorter than *hold* (default 10 s; a tag hears a peer about 3 times in
+  that time) are posture or body shading and stay in the record's average. A
+  longer hold gives fewer, steadier levels; a shorter one catches brief approaches.
+- The records of one contact touch: the next starts where the change began. In the
+  analysis, records of the same pair less than the silence time apart are one
+  encounter; their levels show how its distance changed.
+- With the split off (default) each record is the whole encounter (or a piece of
+  the maximum length).

@@ -91,8 +91,10 @@ class Report:
 
 @dataclass
 class _RecRun:
-    """Records of one peer that follow each other within CHAIN_S: the pieces a
-    long encounter is stored in (each new piece starts where the last ended)."""
+    """Records of one peer that follow each other within CHAIN_S after a
+    max-length piece: the pieces a long encounter is stored in (each new piece
+    starts where the last ended). A record that ends on a level change is
+    followed just as closely by the next, but that one is a run of its own."""
     peer: int
     wall_start: float
     wall_end: float
@@ -102,7 +104,7 @@ class _RecRun:
 CHAIN_S = 5             # a max-length piece and the next one touch (same second; allow clock rounding)
 
 
-def _rec_runs(sim_recs: List[Tuple[float, Record]], sim_uid: str) -> List[_RecRun]:
+def _rec_runs(sim_recs: List[Tuple[float, Record]], sim_uid: str, max_encounter_s: int = 900) -> List[_RecRun]:
     by_peer: dict = {}
     for w, r in sim_recs:
         by_peer.setdefault(scenario.uid_to_peer(sim_uid, r.peer), []).append((w, r))
@@ -111,7 +113,7 @@ def _rec_runs(sim_recs: List[Tuple[float, Record]], sim_uid: str) -> List[_RecRu
         lst.sort(key=lambda x: x[0])
         cur: Optional[_RecRun] = None
         for w, r in lst:
-            if cur is not None and w - cur.wall_end <= CHAIN_S:
+            if cur is not None and w - cur.wall_end <= CHAIN_S and cur.pieces[-1].duration >= max_encounter_s:
                 cur.pieces.append(r)
                 cur.wall_end = max(cur.wall_end, w + r.duration)
                 continue
@@ -123,7 +125,8 @@ def _rec_runs(sim_recs: List[Tuple[float, Record]], sim_uid: str) -> List[_RecRu
 
 def check(records: Sequence[Record], sim_uid: str, sim_clock: Clock, tag_clock: Clock,
           window: Tuple[float, float], silence_gap_s: int = 30, max_encounter_s: int = 900,
-          tol_start_s: Optional[float] = None, tol_dur_s: Optional[float] = None) -> Report:
+          tol_start_s: Optional[float] = None, tol_dur_s: Optional[float] = None,
+          rssi_split_db: int = 0, split_hold_s: int = 10) -> Report:
     """records: the tag's download. sim_clock maps wall -> scenario seconds since
     the simulator's boot, unwrapped (observed scenario time + loops); tag_clock
     maps wall -> tag clock. window: wall seconds the tag was logging the scenario.
@@ -149,7 +152,7 @@ def check(records: Sequence[Record], sim_uid: str, sim_clock: Clock, tag_clock: 
         tol_dur_s = 2.0 * silence_gap_s
     rep = Report()
     w0, w1 = window
-    exp_runs = scenario.expected_runs(silence_gap_s)
+    exp_runs = scenario.expected_runs(silence_gap_s, rssi_split_db, split_hold_s)
     far = scenario.far_peers()
     period = scenario.PERIOD_S
 
@@ -168,7 +171,7 @@ def check(records: Sequence[Record], sim_uid: str, sim_clock: Clock, tag_clock: 
             rep.far_logged.append(r)
             continue
         sim_recs.append((wall, r))
-    runs = _rec_runs(sim_recs, sim_uid)
+    runs = _rec_runs(sim_recs, sim_uid, max_encounter_s)
 
     s0 = w0 + sim_clock.offset_at(w0)            # scenario seconds at the window edges
     s1 = w1 + sim_clock.offset_at(w1)
@@ -334,7 +337,8 @@ def tag_segments(records: Sequence[Record], obs: Sequence[TagObs], start_boots: 
 
 def check_run(records: Sequence[Record], sim_uid: str, sim_obs: Sequence[SimObs],
               tag_obs: Sequence[TagObs], start_boots: int, window: Tuple[float, float],
-              silence_gap_s: int = 30, max_encounter_s: int = 900) -> Report:
+              silence_gap_s: int = 30, max_encounter_s: int = 900,
+              rssi_split_db: int = 0, split_hold_s: int = 10) -> Report:
     """A whole bench run: check each stretch in which both the simulator and the
     tag ran without a restart, each with its own clocks. Time the tag was off
     (power cut: from its last record before the restart to its boot) is not
@@ -365,7 +369,8 @@ def check_run(records: Sequence[Record], sim_uid: str, sim_obs: Sequence[SimObs]
             w0, w1 = max(t_from, ss.start), min(t_to, ss.end)
             if w1 - w0 < 300:
                 continue
-            rep = check(ts.records, sim_uid, ss.clock, ts.clock, (w0, w1), silence_gap_s, max_encounter_s)
+            rep = check(ts.records, sim_uid, ss.clock, ts.clock, (w0, w1), silence_gap_s, max_encounter_s,
+                        rssi_split_db=rssi_split_db, split_hold_s=split_hold_s)
             total.matched += rep.matched
             total.soft_splits += rep.soft_splits
             total.missing += rep.missing

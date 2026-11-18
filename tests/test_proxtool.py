@@ -70,7 +70,7 @@ class Scenario(unittest.TestCase):
         src = pathlib.Path(PEERSIM_C).read_text(encoding="utf-8")
         body = src[src.index("segs[] = {"):src.index("};", src.index("segs[] = {"))]
         rows = [tuple(int(x) for x in m.groups())
-                for m in re.finditer(r"\{\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+)\s*\}", body)]
+                for m in re.finditer(r"\{\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+)\s*\}", body)]
         self.assertEqual(rows, scenario.SEGMENTS)
         hdr = pathlib.Path(PEERSIM_H).read_text(encoding="utf-8")
         self.assertIn(f"#define PEERSIM_VERSION      {scenario.VERSION}", hdr)
@@ -90,7 +90,19 @@ class Scenario(unittest.TestCase):
         self.assertEqual([e.duration for e in by[6]], [29] * 5)
         self.assertEqual([(e.start, e.duration) for e in by[7]], [(2400, 299)])
         self.assertEqual(sum(1 for p in range(8, 21) if by.get(p)), 13)
-        self.assertEqual(len(exp), 27)
+        self.assertEqual([(e.start, e.duration) for e in by[21]], [(1300, 799)])   # level changes: one record
+        self.assertEqual(len(exp), 28)
+
+    def test_level_split_runs(self):
+        """With the level-change split on, peer 21's run ends at each held change,
+        not at the 5 s blip; nothing else changes."""
+        off = scenario.expected_runs(30)
+        on = scenario.expected_runs(30, rssi_split_db=10, split_hold_s=10)
+        self.assertEqual([(r.start, r.duration) for r in on if r.peer == 21], [(1300, 399), (1700, 199), (1900, 199)])
+        self.assertEqual([r for r in on if r.peer != 21], [r for r in off if r.peer != 21])
+        self.assertEqual(scenario.level_cuts(21, 20, 10), [])          # 15 dB < 20 dB step
+        self.assertEqual(scenario.level_cuts(21, 10, 300), [])         # 200 s < 300 s hold
+        self.assertEqual(scenario.level_cuts(21, 10, 4), [1500, 1505, 1700, 1900])   # the blip counts at 4 s
 
 
 def piece_len(expected, jitter, max_s=900):
@@ -147,6 +159,24 @@ class Verify(unittest.TestCase):
         self.assertEqual(len(rep.unexpected), 1)
         self.assertEqual(len(rep.far_logged), 1)
         self.assertEqual(len(rep.other_peers), 1)
+
+    def test_level_split(self):
+        """A tag with the level-change split on logs peer 21 as three touching
+        records: they are three runs, not pieces of one (only max-length pieces chain)."""
+        recs = [r for r in tag_log(self.SIM, self.W0 - 100, 3) if r.peer != scenario.peer_uid(self.SIM, 21)]
+        uid = P.uid_bytes(scenario.peer_uid(self.SIM, 21))
+        seq = 5000
+        for k in range(3):
+            for st, d in ((1300, 399), (1700, 199), (1900, 199)):
+                recs.append(P.parse_record(seq, record_bytes(int(self.W0 - 100 + k * 3600 + st + 2), d - 2, uid, -50, -1)))
+                seq += 1
+        sim = verify.Clock([(self.W0, 100), (self.W0 + 7200, 7300)])
+        tag = verify.Clock([(self.W0, self.W0)])
+        window = (self.W0, self.W0 + 2 * scenario.PERIOD_S + 400)
+        rep = verify.check(recs, self.SIM, sim, tag, window, rssi_split_db=10, split_hold_s=10)
+        self.assertTrue(rep.passed, rep.summary())
+        rep = verify.check(recs, self.SIM, sim, tag, window)          # split off: these are wrong
+        self.assertFalse(rep.passed)
 
     def test_tag_clock_drift(self):
         """A tag clock running 1 s per 10 min fast is corrected from the two observations."""

@@ -499,7 +499,7 @@ class App:
                      "(lifetime, log full)", "", "Settings:"]
             for s in S.SETTINGS:
                 raw = info.config.get(P.REGS.get(s.reg, ""), None)
-                if raw is not None:
+                if raw is not None and not s.missing(raw):
                     lines.append(f"  {s.label}: {s.to_display(raw)} {s.unit}".rstrip())
             lines += ["", "Counters:"]
             for k, v in info.stats.items():
@@ -517,7 +517,7 @@ class App:
         from . import COPYRIGHT, CONTACT, LICENSE, __version__
         notices = os.path.join(os.path.dirname(ASSETS), "THIRD-PARTY-NOTICES.md")
         text = (f"{TITLE}\n"
-                f"proxtool {__version__}, for ProxTit BLE tags (firmware 02.00.x)\n\n"
+                f"proxtool {__version__}, for ProxTit BLE tags (firmware 02.00 and later)\n\n"
                 f"{COPYRIGHT}\n{LICENSE}\n{CONTACT}\n\n"
                 "Uses open-source software under permissive licences: Python and Tkinter (PSF), "
                 "bleak (MIT), pywinrt (MIT, Windows), dbus-fast (MIT, Linux), typing_extensions (PSF); "
@@ -658,7 +658,8 @@ class SettingsDialog:
         holder = ttk.Frame(frm)                 # keeps the place of the hidden frame
         holder.pack(fill="x")
         self.adv_frame = ttk.LabelFrame(holder, text="Radio schedule (detection vs battery)", padding=8)
-        for s in S.SETTINGS:
+        self.shown = [s for s in S.SETTINGS if not s.missing(current.get(s.reg))]
+        for s in self.shown:
             self._row(self.adv_frame if s.advanced else basic, s)
         ttk.Label(frm, text="Use the same settings on every tag of a study.", foreground="#555").pack(anchor="w", pady=(4, 0))
         bar = ttk.Frame(frm)
@@ -688,12 +689,12 @@ class SettingsDialog:
             self.adv_frame.pack_forget()
 
     def _defaults(self) -> None:
-        for s in S.SETTINGS:
+        for s in self.shown:
             self.vars[s.reg].set(s.to_display(int(round(s.default * s.scale))))
 
     def _save(self) -> None:
         wanted, errors = {}, []
-        for s in S.SETTINGS:
+        for s in self.shown:
             raw, why = s.parse(self.vars[s.reg].get())
             if raw is None:
                 errors.append(f"{s.label}: {why}")

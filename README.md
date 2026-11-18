@@ -197,7 +197,7 @@ re-license proxtool or move code from it into closed products.
 | `proxtool update ADDR FILE.gbl --yes` | Firmware update over Bluetooth (see "Firmware update") |
 | `proxtool --via ncp[:PORT] ...` | Any command through a USB NCP adapter instead of this computer's Bluetooth |
 | `proxtool release ADDR MS --yes` | Pulse the drop-off output |
-| `proxtool bench start ADDR... [--clear]` | Find the simulator, write the bench config and clock to the tags, save `bench_session.json` |
+| `proxtool bench start ADDR... [--clear] [--rssi-split DB [--split-hold S]]` | Find the simulator, write the bench config and clock to the tags, save `bench_session.json`; `--rssi-split` also tests the level-change split (firmware 02.01.00, scenario peer 21) |
 | `proxtool bench check [--every S]` | Download the tags and compare with the simulator scenario: PASS / FAIL with the missing and unexpected encounters, start/end error statistics, simulator and tag restarts. `--every 3600` repeats it hourly for overnight runs |
 | `proxtool pair-check A.csv ADDR_A B.csv ADDR_B` | Two real tags: did each log the other at the same times |
 

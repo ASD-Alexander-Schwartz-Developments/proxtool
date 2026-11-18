@@ -76,7 +76,8 @@ rejected as listed. GETCFG returns what the tag actually uses.
 | 0x07 | scan_window | ms | 35 | ≤ scan_interval; the radio listens the whole window |
 | 0x08, 0x09 | turn_on, turn_off | | 0 | reserved: stored (`hour << 8 \| minute`, validated) but not used by 02.00.x |
 | 0x0A | silence_gap | s | 30 | 2–65535: no beacon from a peer for this long ends its encounter |
-| 0x0B | rssi_split | dB | 0 | 0–60: a signal change of more than this starts a new record; 0 = never |
+| 0x0B | rssi_split | dB | 0 | 0–60: a level change of more than this, held for 0x0C s, starts a new record; 0 = never. 02.00.x: a single beacon past it split |
+| 0x0C | split_hold | s | 10 | 2–600: how long a level change must hold (and ≥ 3 beacons) before 0x0B splits (02.01.00; 02.00.x refuses the write and reads 0) |
 
 The `tx_power` byte in the beacon and in a record is whole dBm.
 

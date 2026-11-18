@@ -10,23 +10,30 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, List, Tuple
 
-VERSION = 2
+VERSION = 3
 PERIOD_S = 3600
-PEERS = 20
+PEERS = 21
 
-# (peer, start, end, far, on_s, off_s) — scenario seconds, end exclusive.
-SEGMENTS: List[Tuple[int, int, int, int, int, int]] = [
-    (1, 60, 660, 0, 0, 0),
-    (2, 100, 2200, 0, 0, 0),
-    (3, 300, 900, 0, 40, 20),
-    (4, 1000, 1060, 0, 0, 0),
-    (4, 1120, 1180, 0, 0, 0),
-    (4, 1240, 1300, 0, 0, 0),
-    (5, 0, 3600, 1, 0, 0),
-    (6, 1500, 2700, 0, 30, 255),
-    (7, 2400, 2700, 0, 0, 0),
-    (7, 2700, 3000, 1, 0, 0),
-] + [(p, 3000, 3300, 0, 0, 0) for p in range(8, 21)]
+# (peer, start, end, far, on_s, off_s, atten_db) — scenario seconds, end exclusive.
+# atten_db: the peer transmits that much weaker (the tag sees the path loss rise).
+SEGMENTS: List[Tuple[int, int, int, int, int, int, int]] = [
+    (1, 60, 660, 0, 0, 0, 0),
+    (2, 100, 2200, 0, 0, 0, 0),
+    (3, 300, 900, 0, 40, 20, 0),
+    (4, 1000, 1060, 0, 0, 0, 0),
+    (4, 1120, 1180, 0, 0, 0, 0),
+    (4, 1240, 1300, 0, 0, 0, 0),
+    (5, 0, 3600, 1, 0, 0, 0),
+    (6, 1500, 2700, 0, 30, 255, 0),
+    (7, 2400, 2700, 0, 0, 0, 0),
+    (7, 2700, 3000, 1, 0, 0, 0),
+] + [(p, 3000, 3300, 0, 0, 0, 0) for p in range(8, 21)] + [
+    (21, 1300, 1500, 0, 0, 0, 0),       # level changes (regs 0x0B/0x0C)
+    (21, 1500, 1505, 0, 0, 0, 15),      # a 5 s blip: never splits
+    (21, 1505, 1700, 0, 0, 0, 0),
+    (21, 1700, 1900, 0, 0, 0, 15),      # 200 s 15 dB weaker
+    (21, 1900, 2100, 0, 0, 0, 0),
+]
 
 
 # A silence shorter than the gap but within this margin of it may be logged as a
@@ -44,8 +51,10 @@ class Run:
     soft: Tuple[Tuple[int, int], ...] = ()   # (last second heard, next start) of near-threshold silences
 
 
-def expected_runs(silence_gap_s: int = 30) -> List[Run]:
-    """Whole encounters of one loop, with the near-threshold silences inside them."""
+def expected_runs(silence_gap_s: int = 30, rssi_split_db: int = 0, split_hold_s: int = 10) -> List[Run]:
+    """Whole encounters of one loop, with the near-threshold silences inside them.
+    With the level-change split on, a run also ends where the level moves by more
+    than rssi_split_db for longer than split_hold_s (shorter changes stay in it)."""
     out: List[Run] = []
     for peer in range(1, PEERS + 1):
         merged: List[list] = []
@@ -57,9 +66,30 @@ def expected_runs(silence_gap_s: int = 30) -> List[Run]:
                 merged[-1][1] = max(merged[-1][1], last)
             else:
                 merged.append([a, last, []])
+        cuts = level_cuts(peer, rssi_split_db, split_hold_s) if rssi_split_db else []
         for a, last, soft in merged:
-            out.append(Run(peer, a, max(1, last - a), tuple(soft)))
+            edges = [a] + [c for c in cuts if a < c <= last] + [last + 1]
+            for i in range(len(edges) - 1):
+                s, e = edges[i], edges[i + 1] - 1
+                sf = tuple(x for x in soft if s <= x[0] and x[1] <= e)
+                out.append(Run(peer, s, max(1, e - s), sf))
     return sorted(out, key=lambda r: (r.start, r.peer))
+
+
+def level_cuts(peer: int, split_db: int, hold_s: int) -> List[int]:
+    """Scenario seconds where the tag starts a new record on a level change: the
+    level moves more than split_db from the current record's level and stays
+    there longer than hold_s (shorter stretches are blips)."""
+    segs = sorted((s, e, att) for p, s, e, far, _on, _off, att in SEGMENTS if p == peer and not far)
+    cuts: List[int] = []
+    level = None
+    for s, e, att in segs:
+        if level is None:
+            level = att
+        elif abs(att - level) > split_db and e - s > hold_s:
+            cuts.append(s)
+            level = att
+    return cuts
 
 
 @dataclass(frozen=True)
@@ -72,7 +102,7 @@ class Expected:
 def near_intervals(peer: int) -> List[Tuple[int, int]]:
     """Scenario intervals [a, b) in which `peer` sends in-range beacons."""
     out: List[Tuple[int, int]] = []
-    for p, start, end, far, on_s, off_s in SEGMENTS:
+    for p, start, end, far, on_s, off_s, _att in SEGMENTS:
         if p != peer or far:
             continue
         if on_s == 0:

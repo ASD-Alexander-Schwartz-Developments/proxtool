@@ -268,9 +268,14 @@ def cmd_bench_start(a) -> None:
     for addr in a.tags:
         async def run():
             async with ble.Tag(addr) as t:
-                for reg, val in P.DEFAULT_BENCH_CONFIG.items():
+                cfg = dict(P.DEFAULT_BENCH_CONFIG)
+                cfg[0x0B] = a.rssi_split
+                if a.rssi_split:
+                    cfg[0x0C] = a.split_hold        # firmware 02.01.00 and later
+                for reg, val in cfg.items():
                     if not await t.set_cfg(reg, val):
-                        raise RuntimeError(f"SETCFG 0x{reg:02X}={val} refused")
+                        raise RuntimeError(f"SETCFG 0x{reg:02X}={val} refused"
+                                           + (" (level-change hold needs firmware 02.01.00)" if reg == 0x0C else ""))
                 if a.clear:
                     page = await t.page()
                     if page.pending:
@@ -280,8 +285,10 @@ def cmd_bench_start(a) -> None:
                 return tt, obs, await t.get_cfg(0x0A), await t.get_cfg(0x06)
         tt, obs, gap, cap = asyncio.run(run())
         session["tags"][addr.upper()] = {"set_time": obs[0], "start_boots": obs[2], "clock_obs": [obs],
-                                         "silence_gap_s": gap, "max_encounter_s": cap}
-        print(f"{addr}: clock set {iso(tt)} UTC, boot {obs[2]}, silence gap {gap} s, max length {cap} s")
+                                         "silence_gap_s": gap, "max_encounter_s": cap,
+                                         "rssi_split_db": a.rssi_split, "split_hold_s": a.split_hold}
+        print(f"{addr}: clock set {iso(tt)} UTC, boot {obs[2]}, silence gap {gap} s, max length {cap} s"
+              + (f", level split {a.rssi_split} dB / {a.split_hold} s" if a.rssi_split else ""))
     with open(a.session, "w") as f:
         json.dump(session, f, indent=1)
     print(f"simulator {sim.uid}: uptime {sim.time} s (scenario t={sim.time % scenario.PERIOD_S}), "
@@ -315,7 +322,8 @@ def _bench_check_once(a, session: dict) -> bool:
         tag_obs = [verify.TagObs(*o) for o in meta["clock_obs"]]
         window = (meta["set_time"], meta.get("checked", time.time()))
         rep = verify.check_run(recs, session["sim_uid"], sim_obs, tag_obs, meta["start_boots"], window,
-                               silence_gap_s=meta["silence_gap_s"], max_encounter_s=meta["max_encounter_s"])
+                               silence_gap_s=meta["silence_gap_s"], max_encounter_s=meta["max_encounter_s"],
+                               rssi_split_db=meta.get("rssi_split_db", 0), split_hold_s=meta.get("split_hold_s", 10))
         if late > 5:
             rep.notes.append(f"simulator sent up to {late} % of adverts late: it was overloaded, "
                              "misses may be the simulator's")
@@ -432,12 +440,17 @@ def main(argv=None) -> None:
     s.add_argument("--yes", action="store_true")
     s.set_defaults(fn=cmd_release)
 
+
     b = sub.add_parser("bench", help="bench test against the peer simulator").add_subparsers(dest="bcmd", required=True)
     s = b.add_parser("start", help="find the simulator, configure and clock the tags, write a session file")
     s.add_argument("tags", nargs="+", help="tag addresses")
     s.add_argument("-s", "--session", default="bench_session.json")
     s.add_argument("-t", "--seconds", type=float, default=6)
     s.add_argument("--clear", action="store_true", help="drop what is in the tags' logs first")
+    s.add_argument("--rssi-split", type=int, default=0, metavar="DB",
+                   help="test the level-change split: reg 0x0B (dB, default 0 = off)")
+    s.add_argument("--split-hold", type=int, default=10, metavar="S",
+                   help="with --rssi-split: reg 0x0C, how long a change must hold (s)")
     s.set_defaults(fn=cmd_bench_start)
     s = b.add_parser("check", help="download the tags and compare with the scenario")
     s.add_argument("session", nargs="?", default="bench_session.json")
