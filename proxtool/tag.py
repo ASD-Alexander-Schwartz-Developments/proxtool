@@ -75,6 +75,7 @@ class Tag:
                                   else legacy_local_time)
         self.link: Optional[L.Link] = None
         self._fw: Optional[str] = None
+        self._legacy: Optional[bool] = None
 
     async def __aenter__(self) -> "Tag":
         self.link = await self.transport.connect(self.address, self.timeout)
@@ -99,7 +100,18 @@ class Tag:
         return self._fw
 
     async def legacy(self) -> bool:
-        return is_legacy(await self.firmware())
+        """Firmware before 02.00? Decided by the version string when it is one of
+        ours ("01.02.28", "02.00.01"); otherwise (early builds reported e.g. the
+        SDK version "4.4.2") by asking: only 02.00 and later answer GETPAGE."""
+        if self._legacy is None:
+            fw = await self.firmware()
+            v = parse_version(fw)
+            if v is not None and re.fullmatch(r"\d{2}\.\d{2}\.\d{2}", fw.strip()):
+                self._legacy = v[0] < 2
+            else:
+                r = await self.command(P.CMD_GETPAGE)
+                self._legacy = not P.reply_ok(r, P.CMD_GETPAGE)
+        return self._legacy
 
     # -- clock --
     async def get_time(self) -> int:
@@ -140,8 +152,13 @@ class Tag:
 
     async def page(self) -> P.Page:
         if await self.legacy():
-            # 01.02.x has no GETPAGE: no count, no sequence numbers; the clock is read.
-            return P.Page(0, 0, 0, await self.get_time())
+            # 01.02.x has no GETPAGE: no count, no sequence numbers; the clock is read
+            # (early builds do not answer GETTIME either: clock 0 = unknown).
+            try:
+                t = await self.get_time()
+            except (RuntimeError, ValueError, struct.error):
+                t = 0
+            return P.Page(0, 0, 0, t)
         r = await self.command(P.CMD_GETPAGE)
         if not P.reply_ok(r, P.CMD_GETPAGE):
             raise RuntimeError("GETPAGE refused")

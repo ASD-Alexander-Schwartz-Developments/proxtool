@@ -12,11 +12,12 @@ the tags are (a USB extension cable).
     proxtool --via ncp scan                 # adapter found automatically
     proxtool --via ncp:COM7 download ...    # or name the serial port
 
-Needs `pip install pybgapi` (Silicon Labs, zlib licence). The BGAPI definition
-(api/sl_bt.xapi, Silicon Labs, zlib licence) comes with proxtool; a different
-one can be given with the PROXTOOL_XAPI environment variable. A stack version
-different from the definition's is reported but usually works: proxtool only
-uses scanning, connections and GATT reads/writes.
+Needs `pip install pybgapi` (Silicon Labs, zlib licence). BGAPI renumbers
+commands and events between major stack versions (e.g. 11.x moved GATT write and
+characteristic-value), so proxtool ships one definition per major version, from
+Silicon Labs' zlib-licensed pybgapi-examples (api/sl_bt-<version>.xapi), asks the
+adapter which stack it runs and uses the matching one. PROXTOOL_XAPI names a
+definition file to use instead.
 """
 from __future__ import annotations
 
@@ -31,7 +32,63 @@ from . import protocol as P
 
 log = logging.getLogger("proxtool.ncp")
 
-XAPI = os.environ.get("PROXTOOL_XAPI") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "api", "sl_bt.xapi")
+API_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "api")
+XAPIS = {9: os.path.join(API_DIR, "sl_bt-9.0.0.xapi"),       # Simplicity SDK 2024.12 (stack 9.x)
+         11: os.path.join(API_DIR, "sl_bt-11.0.1.xapi")}     # Simplicity SDK 2025.12 (stack 11.x)
+XAPI_OVERRIDE = os.environ.get("PROXTOOL_XAPI")
+
+
+def xapi_for(major: int) -> str:
+    """The bundled definition for a stack major version: the newest one not newer."""
+    fit = [m for m in XAPIS if m <= major]
+    return XAPIS[max(fit)] if fit else XAPIS[min(XAPIS)]
+
+
+def _tolerate_unknown_events(bgapi) -> None:
+    """pyBGAPI's reader thread stops on an event its definition does not know
+    (e.g. a newer stack's), and the adapter then goes silent. Replace its loop
+    with one that skips such a message.
+
+    ALTERED copy of BGApiConnHandler.run from pyBGAPI 1.3 (Copyright Silicon
+    Laboratories Inc., zlib licence): the only change is the try/except around
+    deser.parse. Marked as altered as the zlib licence requires."""
+    from bgapi import bglib, serdeser
+    if getattr(bglib.BGApiConnHandler, "_proxtool_tolerant", False):
+        return
+
+    def run(self):
+        self.conn.set_read_timeout(self.READ_TIMEOUT)
+        self.conn.set_write_timeout(self.WRITE_TIMEOUT)
+        while not self.stop_flag.is_set():
+            header_start = self.read(size=1)
+            if header_start is None:
+                continue
+            device_id = (header_start[0] & 0x78) >> 3
+            if device_id not in self.ser.apis.keys():
+                continue
+            header_rest = self.read(size=serdeser.HEADER_LENGTH - 1)
+            if header_rest is None:
+                continue
+            header = header_start + header_rest
+            cmdevt, device_id, payload_len, class_index, command_index = self.deser.parseHeader(header)
+            payload = self.read(size=payload_len)
+            if payload is None:
+                continue
+            try:                                            # proxtool change
+                (apicmdevt, headers, params) = self.deser.parse(header, payload, fromHost=False)
+            except serdeser.DeserializerError as e:
+                log.debug("skipped a BGAPI message the definition does not know: %s", e)
+                continue
+            if cmdevt == serdeser.MSG_COMMAND:
+                if self.waiting_response.is_set():
+                    self.response_queue.put((apicmdevt, headers, params))
+                else:
+                    log.debug("late response %s", bglib.BGResponse(apicmdevt, params))
+            else:
+                self.event_handler(bglib.BGEvent(apicmdevt, params))
+
+    bglib.BGApiConnHandler.run = run
+    bglib.BGApiConnHandler._proxtool_tolerant = True
 USB_VIDS = {0x1366: "SEGGER J-Link (Thunderboard, WSTK)", 0x10C4: "Silicon Labs CP210x"}
 PROC_TIMEOUT_S = 10.0
 DISCOVER_OBSERVATION = 2                    # report every advertiser, connectable or not
@@ -190,9 +247,14 @@ class NcpTransport(L.Transport):
             port = found[0][0]
         self.port = port
         self.bgapi = bgapi
+        _tolerate_unknown_events(bgapi)
         self.baudrate, self.rtscts = int(baudrate), rtscts
-        self.lib = bgapi.BGLib(bgapi.SerialConnector(port, baudrate=int(baudrate), rtscts=rtscts), XAPI,
-                               event_handler=self._from_reader)
+        self.xapi = XAPI_OVERRIDE or XAPIS[max(XAPIS)]
+        self.lib = self._new_lib()
+
+    def _new_lib(self):
+        return self.bgapi.BGLib(self.bgapi.SerialConnector(self.port, baudrate=self.baudrate, rtscts=self.rtscts),
+                                self.xapi, event_handler=self._from_reader)
 
     # -- plumbing --
     def call(self, fn: Callable[[], object]):
@@ -243,15 +305,28 @@ class NcpTransport(L.Transport):
                 self.links.clear()
             return
         self.loop = running
-        evt = await self._boot()
-        if evt is None and self.bgapi is not None:
-            # NCP builds differ in hardware flow control (the Silicon Labs example
-            # enables RTS/CTS; many adapters do not wire it): try the other way.
-            self.rtscts = not self.rtscts
-            self.lib = self.bgapi.BGLib(self.bgapi.SerialConnector(self.port, baudrate=self.baudrate,
-                                                                   rtscts=self.rtscts),
-                                        XAPI, event_handler=self._from_reader)
+        evt = None
+        if self.bgapi is None:                      # tests: the stand-in adapter
             evt = await self._boot()
+        else:
+            # Try each definition (newest first: its reboot works on every stack
+            # that has one) and both hardware flow control settings (the Silicon
+            # Labs example enables RTS/CTS; many adapters do not wire it).
+            for xapi in ([XAPI_OVERRIDE] if XAPI_OVERRIDE else [XAPIS[m] for m in sorted(XAPIS, reverse=True)]):
+                for rtscts in (self.rtscts, not self.rtscts):
+                    self.xapi, self.rtscts = xapi, rtscts
+                    self.lib = self._new_lib()
+                    evt = await self._boot()
+                    if evt is not None:
+                        break
+                if evt is not None:
+                    break
+            if evt is not None and not XAPI_OVERRIDE and xapi_for(evt.major) != self.xapi:
+                # Booted: now talk with the definition that matches its stack.
+                self.lib.close()
+                self.xapi = xapi_for(evt.major)
+                self.lib = self._new_lib()
+                self.lib.open()
         if evt is None:
             self.loop = None
             raise SystemExit(f"no answer from the NCP adapter on {self.port} (is it running the "
@@ -270,7 +345,12 @@ class NcpTransport(L.Transport):
             raise SystemExit(f"cannot open {self.port}: {e}")
         boot = self._expect(lambda e: e == "bt_evt_system_boot")
         try:
-            self.lib.bt.system.reset(0)
+            # system_reboot (newer stacks: system_reset answers "not supported");
+            # system_reset for stacks that predate reboot.
+            try:
+                self.lib.bt.system.reboot()
+            except Exception:
+                self.lib.bt.system.reset(0)
             return await asyncio.wait_for(boot, 4.0)
         except Exception:                      # timeout, or the write blocked (flow control)
             boot.cancel()

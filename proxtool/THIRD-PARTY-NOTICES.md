@@ -16,14 +16,15 @@ notices are kept, as this file does.
 | async-timeout (Python < 3.11 only) | timeouts | Apache License 2.0 | aio-libs contributors | <https://github.com/aio-libs/async-timeout> |
 | pyBGAPI (optional, `ncp` transport) | talking to a Silicon Labs NCP adapter | zlib | Silicon Laboratories Inc. | <https://pypi.org/project/pybgapi/> |
 | pySerial (optional, `ncp` transport) | the adapter's serial port | BSD-3-Clause | Chris Liechti | <https://github.com/pyserial/pyserial> |
-| `proxtool/api/sl_bt.xapi` (shipped) | Bluetooth API definition for pyBGAPI (Simplicity SDK 2024.12) | zlib | Silicon Laboratories Inc. | see the zlib text below |
+| `proxtool/api/sl_bt-9.0.0.xapi`, `sl_bt-11.0.1.xapi` (shipped) | Bluetooth API definitions for pyBGAPI (Simplicity SDK 2024.12 and 2025.12), from Silicon Labs' pybgapi-examples | zlib | Silicon Laboratories Inc. | see the zlib text below |
 
 Not shipped: Pillow (MIT-CMU) was used once to make the icon files in `assets/`.
 macOS (pyobjc, MIT) is not supported.
 
 The firmware update speaks the Silicon Labs AppLoader OTA DFU protocol (public
-Silicon Labs documentation, AN1086). Apart from the shipped `sl_bt.xapi`
-definition file, no Silicon Labs code is part of proxtool.
+Silicon Labs documentation, AN1086). Apart from the shipped `.xapi`
+definition files and the altered pyBGAPI routine above, no Silicon Labs code is
+part of proxtool.
 The ASD name and logo (`assets/`) are trademarks of A.S.D and are not covered
 by any open-source licence.
 
@@ -52,7 +53,9 @@ freely, subject to the following restrictions:
    misrepresented as being the original software.
 3. This notice may not be removed or altered from any source distribution.
 
-`sl_bt.xapi` is shipped unaltered.
+The `.xapi` files are shipped unaltered. `proxtool/ncp.py` contains an **altered**
+copy of pyBGAPI's `BGApiConnHandler.run` (pyBGAPI 1.3): it skips messages the
+definition does not know instead of stopping; it is marked as altered there.
 
 ## MIT licence text (bleak, pywinrt, dbus-fast)
 

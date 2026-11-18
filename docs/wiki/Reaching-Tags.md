@@ -19,9 +19,10 @@ This is how ProxTit tags were downloaded before proxtool (the earlier
 
 - **Firmware on the adapter:** the Silicon Labs *Bluetooth - NCP* example for that
   board (from Simplicity Studio), or the image ASD supplied with it. proxtool
-  talks to it in Silicon Labs' BGAPI protocol and reports the stack version it
-  finds. Older and newer stacks normally work, since proxtool only scans,
-  connects and reads and writes characteristics.
+  asks the adapter which Bluetooth stack it runs and talks to it accordingly:
+  stacks from Simplicity SDK 2024.12 (BGAPI 9) and 2025.12 or later (BGAPI 11)
+  are supported. Silicon Labs renumbered parts of the protocol between them.
+  If the adapter needs it, flow control is switched automatically.
 - **Finding it:** proxtool picks the adapter by its USB id (SEGGER J-Link, as on
   Thunderboards, or a Silicon Labs CP210x). With more than one such device
   plugged in, name the port: in the window it is listed as "USB adapter (NCP) on

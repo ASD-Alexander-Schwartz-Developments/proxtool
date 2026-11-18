@@ -35,8 +35,9 @@ def rec(start, dur, peer=b"\x01\x02\x03\x04\x05\x06", rssi=-60, tx=-1):
 class FakeTag:
     """GATT side of a tag on firmware 01.02.28 or 02.00.01."""
 
-    def __init__(self, fw, records):
+    def __init__(self, fw, records, legacy=None):
         self.fw = fw.encode()
+        self.legacy = fw.startswith("01.") if legacy is None else legacy
         self.records = list(records)
         self.reply = bytes(28)
         self.clock = None
@@ -50,7 +51,7 @@ class FakeTag:
             return 0, self.fw
         if h == 0x30:
             return 0, self.reply
-        if self.fw.startswith(b"01."):                       # one record per read, deleted
+        if self.legacy:                                     # one record per read, deleted
             if not self.records:
                 return 0x0411, b""                         # ATT error: empty
             return 0, self.records.pop(0)
@@ -65,6 +66,8 @@ class FakeTag:
         elif cmd == P.CMD_SETTIME_UNIX:
             self.clock = struct.unpack_from("<I", data, 1)[0]
             self.reply = bytes([cmd | 0x80]) + struct.pack("<I", self.clock) + bytes(23)
+        elif cmd == P.CMD_GETPAGE and self.legacy:
+            self.reply = bytes([cmd]) + bytes(27)            # refused: no GETPAGE before 02.00
         elif cmd == P.CMD_GETPAGE:
             self.reply = bytes([cmd | 0x80]) + struct.pack("<IIII", len(self.records), self.head_seq, 0,
                                                            self.clock or 0) + bytes(11)
@@ -137,8 +140,8 @@ class FakeLib:
             done(me.tag.write(h, bytes(data)))
 
         self.bt = SimpleNamespace(
-            system=SimpleNamespace(reset=lambda mode: emit("bt_evt_system_boot", major=9, minor=0, patch=0,
-                                                           build=1, bootloader=0, hw=0, hash=0)),
+            system=SimpleNamespace(reboot=lambda: emit("bt_evt_system_boot", major=11, minor=1, patch=2,
+                                                       build=1, bootloader=0, hw=0, hash=0)),
             gatt=SimpleNamespace(set_max_mtu=lambda m: None,
                                  discover_primary_services=lambda c: (emit("bt_evt_gatt_service", connection=1,
                                                                            service=7, uuid=b"\x00" * 16), done()),
@@ -195,6 +198,25 @@ class Ncp(unittest.TestCase):
         self.assertTrue(all(r.seq == -1 for r in got))
         self.assertEqual(fake.clock, 1_800_000_000)                          # UTC calendar date
         self.assertEqual(fake.records, [])
+
+    def test_unknown_version_string(self):
+        """An early build reporting the SDK version is told apart by asking."""
+        fake = FakeTag("4.4.2", [rec(3000, 4)], legacy=True)
+        t = ncp.NcpTransport(lib=FakeLib(fake))
+        got = []
+
+        async def go():
+            async with Tag(TAG, t) as tag:
+                self.assertTrue(await tag.legacy())
+                return await tag.download(lambda r: got.extend(r))
+        self.assertEqual(run(go()), 1)
+        fake2 = FakeTag("4.4.2", [], legacy=False)
+        t2 = ncp.NcpTransport(lib=FakeLib(fake2))
+
+        async def go2():
+            async with Tag(TAG, t2) as tag:
+                return await tag.legacy()
+        self.assertFalse(run(go2()))
 
     def test_new_download_acks(self):
         fake = FakeTag("02.00.01", [rec(2000 + i, 9) for i in range(20)])

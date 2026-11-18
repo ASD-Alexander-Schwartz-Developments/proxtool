@@ -75,7 +75,7 @@ FLAG_LOW_BATTERY = 0x04
 
 # Marker records: peer FF:FF:FF:FF:FF:<type>, rssi 127.
 MARKER_RSSI = 127
-MARKERS = {1: "BOOT", 2: "TIMESET", 3: "POWEROFF", 4: "START", 0xFE: "UNREADABLE"}
+MARKERS = {1: "BOOT", 2: "TIMESET", 3: "POWEROFF", 4: "START", 5: "SETTINGS", 0xFE: "UNREADABLE"}
 POWEROFF_REASONS = {1: "mode Off", 2: "low battery", 3: "host sleep"}
 
 # EFR32BG22 EMU->RSTCAUSE bits (BOOT marker, GETSTATS reset_cause).
@@ -180,6 +180,9 @@ class Record:
             return f"POWEROFF {POWEROFF_REASONS.get(self.duration, self.duration)}"
         if m == "START":
             return f"START logging (was {MODES.get(self.duration, self.duration)}, clock set: {bool(self.tx_power)})"
+        if m == "SETTINGS":
+            why = "first start after an update from firmware 01.x" if self.tx_power else "invalid values"
+            return f"SETTINGS {self.duration} setting(s) changed at start ({why})"
         return m
 
 

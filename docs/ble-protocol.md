@@ -146,6 +146,7 @@ The log also holds marker records: `addr` = `<type>, FF, FF, FF, FF, FF` (shown
 | 0x02 | TIMESET | new clock | clock just before the change | 0 |
 | 0x03 | POWEROFF | clock | reason: 1 mode Off, 2 low battery, 3 host SLEEP | 0 |
 | 0x04 | START | clock | previous mode | 1 if the clock was set since boot |
+| 0x05 | SETTINGS | clock | number of settings the tag changed at start | 1 = first start after an update from firmware 01.x (factory radio schedule moved to the 02.x defaults), 0 = invalid values put back to defaults (02.00.02 and later) |
 | 0xFE | UNREADABLE | 0 | 0 | 0 — served in place of a record the flash could not read, so the download and the sequence go on; acknowledge it like any record |
 
 **Re-dating after a reset.** The clock restarts from the last saved time (saved

@@ -43,6 +43,7 @@ One line per record, with a header line:
 | BOOT | The tag (re)started; `detail` gives the reason (power-on, watchdog, ...). Records after it are behind by the time the tag was off, until the clock is set. |
 | TIMESET | The clock was set; `detail` gives the step. |
 | START | Logging started (mode changed to logger). |
+| SETTINGS | At start the tag changed settings by itself: values out of range went back to defaults, or, on the first start after an update from firmware 01.x, the old factory radio schedule moved to the current defaults. `detail` gives the number. Check the settings. |
 | POWEROFF | The tag switched off (mode Off, low battery, host request). |
 | UNREADABLE | A record the tag's memory could not read; a placeholder so the download goes on. |
 
