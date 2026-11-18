@@ -72,16 +72,19 @@ Expected false splits during continuous contact between two tags:
 ## Changes of distance within an encounter
 
 A record holds one mean signal level. To see animals move closer or apart during a
-contact, switch on the **level-change split** (firmware 02.01.00): when the path loss
-stays more than *split* dB from the record's average for *hold* seconds, the record
-ends there and a new one starts, with its own average. For example 65 dB, then
+contact, switch on the **level-change split** (firmware 02.01.00; judged on the average
+from 02.02.00): when the average path loss moves more than *split* dB from the record's
+average and stays there for *hold* seconds, the record ends there and a new one starts
+where the change began, with its own average. Single beacons that jump back do not
+cancel a real change. For example 65 dB, then
 50 dB for 2 minutes: two records, back to back, 65 and 50 dB.
 
 - Choose *split* from a calibration: about the difference between the median path
   losses of two distances you want told apart (e.g. 1 m and 3 m). Below about
   8 dB the normal spread of the signal causes splits on its own.
 - Changes shorter than *hold* (default 10 s; a tag hears a peer about 3 times in
-  that time) are posture or body shading and stay in the record's average. A
+  that time) are posture or body shading and stay in the record's average. A change
+  only just bigger than *split* needs some more beacons (about 20 s at 3 dB above). A
   longer hold gives fewer, steadier levels; a shorter one catches brief approaches.
 - The records of one contact touch: the next starts where the change began. In the
   analysis, records of the same pair less than the silence time apart are one

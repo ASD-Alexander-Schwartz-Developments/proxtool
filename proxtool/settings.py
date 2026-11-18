@@ -89,8 +89,8 @@ SETTINGS: List[Setting] = [
             "Listening time per scan interval. Longer = hears peers more often, more battery "
             "(listening is the largest battery cost).", advanced=True),
     Setting(0x0B, "Level-change split", "dB", 0, 60, 0,
-            "When the path loss stays more than this away from the encounter's average for the "
-            "hold time, a new record starts there (the animals moved closer or apart). 0 = never "
+            "When the average path loss moves more than this away from the encounter's average "
+            "for the hold time, a new record starts there (the animals moved closer or apart). 0 = never "
             "(default). Choose it from a calibration: about the difference "
             "between two distances you want told apart. Before firmware 02.01.00 a single jump split."),
     Setting(0x0C, "Level-change hold", "s", 2, 600, 10,
